@@ -1,0 +1,19 @@
+{
+  "rules": {
+    ".read": true,
+    ".write": true,
+    "webrtc_sessions": {
+      ".read": true,
+      ".write": true
+    },
+    "device_status": {
+      ".read": true,
+      ".write": true
+    },
+    "debug": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}
+
