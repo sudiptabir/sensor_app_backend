@@ -1,7 +1,11 @@
 {
   "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1",
     "firebase-admin": "^13.6.0",
-    "uuid": "^13.0.0",
-    "dotenv": "^16.4.5"
+    "pg": "^8.17.2",
+    "socket.io": "^4.8.3",
+    "uuid": "^13.0.0"
   }
 }

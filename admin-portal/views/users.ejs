@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Users - Admin Portal</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+  <style>
+    body { background: #f5f7fa; }
+    .sidebar {
+      min-height: 100vh;
+      background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    .sidebar a {
+      color: rgba(255,255,255,0.8);
+      text-decoration: none;
+      padding: 15px 20px;
+      display: block;
+    }
+    .sidebar a:hover, .sidebar a.active {
+      background: rgba(255,255,255,0.1);
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <div class="container-fluid">
+    <div class="row">
+      <%- include('partials/sidebar', { activePage: 'users', adminName }) %>
+      
+      <main class="col-md-10 ms-sm-auto px-4 py-4">
+        <h1 class="mb-4">User Management</h1>
+        
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Mobile App Users</h5>
+            <input type="text" class="form-control w-25" placeholder="Search users..." id="searchBox">
+          </div>
+          <div class="card-body">
+            <table class="table table-hover">
+              <thead>
+                <tr>
+                  <th>User ID</th>
+                  <th>Email</th>
+                  <th>Display Name</th>
+                  <th>Status</th>
+                  <th>Joined</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <% users.forEach(user => { %>
+                  <tr class="<%= user.isBlocked ? 'table-danger' : '' %>">
+                    <td><code><%= user.id %></code></td>
+                    <td><%= user.email || 'N/A' %></td>
+                    <td><%= user.displayName || 'Anonymous' %></td>
+                    <td>
+                      <% if (user.isBlocked) { %>
+                        <span class="badge bg-danger">Blocked</span>
+                        <small class="text-muted d-block"><%= user.blockReason %></small>
+                      <% } else { %>
+                        <span class="badge bg-success">Active</span>
+                      <% } %>
+                    </td>
+                    <td><%= user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'Unknown' %></td>
+                    <td>
+                      <% if (user.isBlocked) { %>
+                        <button class="btn btn-sm btn-success" onclick="unblockUser('<%= user.id %>')">
+                          <i class="bi bi-check-circle"></i> Unblock
+                        </button>
+                      <% } else { %>
+                        <button class="btn btn-sm btn-danger" onclick="blockUser('<%= user.id %>')">
+                          <i class="bi bi-x-circle"></i> Block
+                        </button>
+                      <% } %>
+                    </td>
+                  </tr>
+                <% }); %>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+  
+  <script>
+    document.getElementById('searchBox').addEventListener('input', function(e) {
+      const searchTerm = e.target.value.toLowerCase();
+      const rows = document.querySelectorAll('tbody tr');
+      rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(searchTerm) ? '' : 'none';
+      });
+    });
+    
+    async function blockUser(userId) {
+      const reason = prompt('Enter reason for blocking this user:');
+      if (!reason) return;
+      
+      try {
+        console.log('Blocking user:', userId, 'with reason:', reason);
+        const response = await fetch(`/api/users/${userId}/block`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin', // Include cookies
+          body: JSON.stringify({ reason })
+        });
+        
+        console.log('Response status:', response.status);
+        const data = await response.json();
+        console.log('Response data:', data);
+        
+        if (response.ok) {
+          alert('User blocked successfully');
+          location.reload();
+        } else {
+          alert('Failed to block user: ' + (data.error || 'Unknown error') + (data.details ? '\n' + data.details : ''));
+        }
+      } catch (error) {
+        console.error('Error blocking user:', error);
+        alert('Error: ' + error.message);
+      }
+    }
+    
+    async function unblockUser(userId) {
+      if (!confirm('Are you sure you want to unblock this user?')) return;
+      
+      try {
+        console.log('Unblocking user:', userId);
+        const response = await fetch(`/api/users/${userId}/unblock`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin' // Include cookies
+        });
+        
+        console.log('Response status:', response.status);
+        const data = await response.json();
+        console.log('Response data:', data);
+        
+        if (response.ok) {
+          alert('User unblocked successfully');
+          location.reload();
+        } else {
+          alert('Failed to unblock user: ' + (data.error || 'Unknown error') + (data.details ? '\n' + data.details : ''));
+        }
+      } catch (error) {
+        console.error('Error unblocking user:', error);
+        alert('Error: ' + error.message);
+      }
+    }
+  </script>
+</body>
+</html>

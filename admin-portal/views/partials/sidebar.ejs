@@ -1,0 +1,22 @@
+<div class="col-md-2 sidebar p-0">
+  <div class="p-3">
+    <h3 class="mb-4">🔐 Admin</h3>
+    <p class="small opacity-75"><%= adminName %></p>
+  </div>
+  
+  <nav>
+    <a href="/dashboard" class="<%= activePage === 'dashboard' ? 'active' : '' %>">
+      <i class="bi bi-speedometer2"></i> Dashboard
+    </a>
+    <a href="/devices" class="<%= activePage === 'devices' ? 'active' : '' %>">
+      <i class="bi bi-router"></i> Devices
+    </a>
+    <a href="/users" class="<%= activePage === 'users' ? 'active' : '' %>">
+      <i class="bi bi-people"></i> Users
+    </a>
+    <hr class="my-3 opacity-25">
+    <a href="/logout">
+      <i class="bi bi-box-arrow-right"></i> Logout
+    </a>
+  </nav>
+</div>
