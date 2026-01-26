@@ -138,6 +138,7 @@ app.use(helmet({
       scriptSrcAttr: ["'unsafe-inline'"], // Allow inline event handlers (onclick)
       imgSrc: ["'self'", "data:", "https:"],
       fontSrc: ["'self'", "https://cdn.jsdelivr.net"],
+      formAction: ["'self'"], // Allow form submissions to same origin
     },
   },
 }));
