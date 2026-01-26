@@ -1,4 +1,15 @@
 {
+  "name": "sensor-iot-backend",
+  "version": "1.0.0",
+  "description": "IoT Sensor Backend with PostgreSQL and Real-time WebSocket",
+  "main": "sensor-backend.js",
+  "scripts": {
+    "start": "node sensor-backend.js",
+    "dev": "node sensor-backend.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
