@@ -1,8 +1,5 @@
--- TimescaleDB Schema for Sensor Data
+-- PostgreSQL Schema for Sensor Data
 -- Run this file after connecting to sensor_db
-
--- Enable TimescaleDB extension
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 -- ============================================
 -- 1. SENSORS TABLE (Metadata)
@@ -35,9 +32,6 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
   quality INT DEFAULT 100,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
--- Convert to hypertable for efficient time-series storage
-SELECT create_hypertable('sensor_readings', 'time', if_not_exists => TRUE);
 
 -- Create indexes for fast queries
 CREATE INDEX IF NOT EXISTS ix_sensor_readings_sensor_id_time 
@@ -82,13 +76,7 @@ CREATE TABLE IF NOT EXISTS alert_rules (
 );
 
 -- ============================================
--- 5. DATA RETENTION POLICY (Optional)
--- ============================================
--- Keep data for 90 days, compressed after 7 days
-SELECT add_retention_policy('sensor_readings', INTERVAL '90 days', if_not_exists => TRUE);
-
--- ============================================
--- 6. TEST DATA - SAMPLE SENSORS
+-- 5. TEST DATA - SAMPLE SENSORS
 -- ============================================
 -- LAPTOP Device (Single Device Setup)
 INSERT INTO device_metadata (device_id, device_name, device_type, location, is_online)
@@ -113,11 +101,16 @@ ON CONFLICT DO NOTHING;
 -- ✅ 1 Device: LAPTOP-14678VIP
 -- ✅ 5 Sensors: CPU Temperature, Memory Usage, Disk Usage, GPU Temperature, Battery Level
 -- ✅ Continuous test data generation via sensor-test-generator.js
+--6. VERIFY INSTALLATION
+-- ============================================
+-- Current Status:
+-- ✅ 1 Device: LAPTOP-14678VIP
+-- ✅ 5 Sensors: CPU Temperature, Memory Usage, Disk Usage, GPU Temperature, Battery Level
+-- ✅ Continuous test data generation via sensor-test-generator.js
 --
 -- Run these queries to verify:
 SELECT COUNT(*) as total_sensors FROM sensors;
 SELECT COUNT(*) as total_readings FROM sensor_readings;
 SELECT COUNT(*) as total_devices FROM device_metadata;
 SELECT device_id, device_name, is_online FROM device_metadata;
-SELECT sensor_id, sensor_name, sensor_type FROM sensors ORDER BY sensor_id;
-SELECT * FROM timescaledb_information.hypertables;
+SELECT sensor_id, sensor_name, sensor_type FROM sensors ORDER BY sensor_id
