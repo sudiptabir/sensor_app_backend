@@ -9,6 +9,8 @@
 const http = require('http');
 const { spawn } = require('child_process');
 const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
 
 // Initialize Firebase Admin
 const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './serviceAccountKey.json';
@@ -24,16 +26,59 @@ try {
 }
 
 const db = admin.database();
-const DEVICE_ID = require('os').hostname().toLowerCase().replace(/[^a-z0-9-]/g, '');
+const firestore = admin.firestore();
+
+// Get device ID - try multiple sources
+function getDeviceID() {
+  // 1. Try device_id.txt file (most reliable for registered devices)
+  try {
+    const deviceIdPath = path.join(__dirname, 'device_id.txt');
+    if (fs.existsSync(deviceIdPath)) {
+      const deviceId = fs.readFileSync(deviceIdPath, 'utf8').trim();
+      if (deviceId) {
+        console.log('📋 Device ID loaded from device_id.txt');
+        return deviceId;
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️  Could not read device_id.txt:', err.message);
+  }
+
+  // 2. Fallback to hostname (for backward compatibility)
+  const hostname = require('os').hostname().toLowerCase().replace(/[^a-z0-9-]/g, '');
+  console.log('📋 Using hostname as device ID:', hostname);
+  return hostname;
+}
+
+const DEVICE_ID = getDeviceID();
+
+// Get local IP address (for remote access)
+function getLocalIPAddress() {
+  const { networkInterfaces } = require('os');
+  const nets = networkInterfaces();
+  
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // Skip internal (i.e. 127.0.0.1) and non-IPv4 addresses
+      const familyV4Value = typeof net.family === 'string' ? 'IPv4' : 4;
+      if (net.family === familyV4Value && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return 'localhost';
+}
 
 // Server config
 const HTTP_PORT = process.env.MJPEG_PORT || 8080;
+const LOCAL_IP = getLocalIPAddress();
 const FRAMERATE = 15;
 const QUALITY = 80;
 
 console.log(`\n🎥 MJPEG Camera Server`);
 console.log(`━━━━━━━━━━━━━━━━━━━━━━`);
 console.log(`Device ID: ${DEVICE_ID}`);
+console.log(`Local IP: ${LOCAL_IP}`);
 console.log(`Port: ${HTTP_PORT}`);
 console.log(`Framerate: ${FRAMERATE} fps`);
 console.log(`JPEG Quality: ${QUALITY}%`);
@@ -197,11 +242,22 @@ const server = http.createServer((req, res) => {
 
   // Health check endpoint
   if (url.pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    });
     res.end(JSON.stringify({ 
       status: 'ok', 
       device: DEVICE_ID,
       port: HTTP_PORT,
+      localIP: LOCAL_IP,
+      hasFrames: latestFrame !== null,
+      frameCount: frameCount,
+      streamEndpoints: {
+        mjpeg: `/stream.mjpeg`,
+        frame: `/frame.jpg`,
+        health: `/health`
+      },
       timestamp: new Date().toISOString()
     }));
     return;
@@ -215,16 +271,42 @@ const server = http.createServer((req, res) => {
 // Start server
 server.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`\n✅ MJPEG server listening on http://0.0.0.0:${HTTP_PORT}`);
-  console.log(`📹 Stream URL: http://<device-ip>:${HTTP_PORT}/stream.mjpeg`);
-  console.log(`💓 Health check: http://<device-ip>:${HTTP_PORT}/health`);
+  console.log(`📹 Local Stream URL: http://${LOCAL_IP}:${HTTP_PORT}/stream.mjpeg`);
+  console.log(`📹 Single Frame URL: http://${LOCAL_IP}:${HTTP_PORT}/frame.jpg`);
+  console.log(`💓 Health check: http://${LOCAL_IP}:${HTTP_PORT}/health`);
+  console.log(`\n⚠️  For remote access from mobile app:`);
+  console.log(`   1. Ensure port ${HTTP_PORT} is forwarded on your router`);
+  console.log(`   2. Use your public IP or set up dynamic DNS`);
+  console.log(`   3. Update ipAddress field in Firebase device entry`);
 
-  // Update Firebase with streaming info
-  db.ref(`devices/${DEVICE_ID}`).update({
+  // Update both Realtime Database and Firestore
+  const streamingData = {
     streaming_enabled: true,
-    streaming_url: `http://<your-pi-ip>:${HTTP_PORT}/stream.mjpeg`,
+    streaming_url: `http://${LOCAL_IP}:${HTTP_PORT}/stream.mjpeg`,
     streaming_type: 'mjpeg',
+    streaming_port: HTTP_PORT,
+    ipAddress: LOCAL_IP,
+    ip_address: LOCAL_IP,
     last_updated: new Date().getTime()
-  }).catch(err => console.error('Firebase update error:', err.message));
+  };
+
+  // Update Realtime Database
+  db.ref(`devices/${DEVICE_ID}`).update(streamingData)
+    .then(() => console.log('✅ Realtime Database updated'))
+    .catch(err => console.error('❌ Realtime Database update error:', err.message));
+
+  // Update Firestore (where the app reads device info)
+  firestore.collection('devices').doc(DEVICE_ID).update({
+    ipAddress: LOCAL_IP,
+    ip_address: LOCAL_IP,
+    streaming_enabled: true,
+    streaming_url: `http://${LOCAL_IP}:${HTTP_PORT}/stream.mjpeg`,
+    streaming_type: 'mjpeg',
+    streaming_port: HTTP_PORT,
+    lastSeen: admin.firestore.FieldValue.serverTimestamp()
+  })
+    .then(() => console.log('✅ Firestore updated with streaming info'))
+    .catch(err => console.error('❌ Firestore update error:', err.message));
 });
 
 server.on('error', (err) => {

@@ -23,6 +23,10 @@ export default function RootLayout() {
         "[RootLayout] Auth state changed:",
         firebaseUser?.email ?? "null"
       );
+      console.log(
+        "[RootLayout] 🆔 Firebase User ID:",
+        firebaseUser?.uid ?? "null"
+      );
       setUser(firebaseUser);
       setLoading(false);
     });
@@ -39,6 +43,8 @@ export default function RootLayout() {
     const currentRoot = segments[0]; // first route segment
     const isOnLogin = segments.length === 0; // "/"
     const isOnDashboard = currentRoot === "dashboard";
+    const isOnSensorList = currentRoot === "sensor-list";
+    const isOnAllowedRoute = isOnDashboard || isOnSensorList;
 
     if (!user && !isOnLogin) {
       console.log("[RootLayout] 🔐 No user → redirect to login");
@@ -46,9 +52,15 @@ export default function RootLayout() {
       return;
     }
 
-    if (user && !isOnDashboard) {
+    if (user && isOnLogin) {
       console.log("[RootLayout] ✅ User logged in → redirect to dashboard");
       router.replace("/dashboard");
+      return;
+    }
+
+    if (!user && isOnAllowedRoute) {
+      console.log("[RootLayout] 🔐 No user on protected route → redirect to login");
+      router.replace("/");
     }
   }, [user, loading, segments]);
 

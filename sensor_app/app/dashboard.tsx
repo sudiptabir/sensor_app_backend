@@ -1,22 +1,29 @@
-import { View, Text, Button, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Alert, TextInput, Modal, Linking } from "react-native";
+import { View, Text, Button, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Alert, TextInput, Modal, Linking, Share, Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { signOut, onAuthStateChanged } from "firebase/auth";
 import { auth } from "../firebase/firebaseConfig";
-import { useState, useEffect } from "react";
-import { listenToUserDevices, updateDeviceLabel, listenToDeviceReadings, getAvailableDevicesForUser, claimDevice, unclaimDevice, listenToUserAlerts, updateAlertRating } from "../db/firestore";
+import { useState, useEffect, useRef } from "react";
+import { listenToUserDevices, updateDeviceLabel, listenToDeviceReadings, getAvailableDevicesForUser, claimDevice, unclaimDevice, listenToUserAlerts, updateAlertRating, listenToUserMLAlerts, updateMLAlertRating } from "../db/firestore";
 import { useRouter } from "expo-router";
-import { initPushNotifications, sendTestNotification, setupNotificationListeners } from "../utils/notifications";
-import { triggerTestAlert } from "../utils/testAlerts";
+import { initPushNotifications, setupNotificationListeners } from "../utils/notifications";
 import { getCameraStreamUrl, getCameraWebUIUrl, getDeviceStreamingInfo } from "../utils/cameraStreaming";
+import { rateMLAlert, acknowledgeAlert, deleteAlert } from "../utils/mlAlertHandler";
 import MJPEGVideoPlayer from "../utils/MJPEGVideoPlayer";
 import { LinearGradient } from "expo-linear-gradient";
 import { MaterialIcons } from "@expo/vector-icons";
+import * as Notifications from "expo-notifications";
+import type { MLAlert } from "../types/mlAlertTypes";
+import SensorCard from "../components/SensorCard";
+import * as FileSystem from 'expo-file-system';
+import RNFS from 'react-native-fs';
+import { getFirestore, collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
 
 export default function Dashboard() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [loggingOut, setLoggingOut] = useState(false);
   const [alerts, setAlerts] = useState<any[]>([]);
+  const [mlAlerts, setMLAlerts] = useState<MLAlert[]>([]);
   const [devices, setDevices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"alerts" | "devices">("alerts");
@@ -27,6 +34,7 @@ export default function Dashboard() {
   const [claimingDeviceId, setClaimingDeviceId] = useState<string | null>(null);
   const [unsubscribeAlerts, setUnsubscribeAlerts] = useState<(() => void) | null>(null);
   const [unsubscribeDevices, setUnsubscribeDevices] = useState<(() => void) | null>(null);
+  const [unsubscribeMLAlerts, setUnsubscribeMLAlerts] = useState<(() => void) | null>(null);
   const [readingsUnsubscribes, setReadingsUnsubscribes] = useState<(() => void)[]>([]);
   const [showRatingModal, setShowRatingModal] = useState(false);
   const [selectedAlert, setSelectedAlert] = useState<any | null>(null);
@@ -36,6 +44,30 @@ export default function Dashboard() {
   const [selectedDeviceForVideo, setSelectedDeviceForVideo] = useState<any | null>(null);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [streamingMode, setStreamingMode] = useState<"http" | "webrtc">("http");
+  const [showMLAlertDetailModal, setShowMLAlertDetailModal] = useState(false);
+  const [selectedMLAlert, setSelectedMLAlert] = useState<MLAlert | null>(null);
+  const [mlAlertRating, setMLAlertRating] = useState<number | null>(null);
+  const [mlAlertAccuracy, setMLAlertAccuracy] = useState<boolean | null>(null);
+  const [sendingTestNotification, setSendingTestNotification] = useState<string | null>(null);
+  
+  // Track which alerts have already been notified
+  const shownNotificationsRef = useRef<Set<string>>(new Set());
+
+  // Data Recording States
+  const [showRecordingModal, setShowRecordingModal] = useState(false);
+  const [selectedDeviceForRecording, setSelectedDeviceForRecording] = useState<any | null>(null);
+  const [recordingDuration, setRecordingDuration] = useState<5 | 10>(5);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedData, setRecordedData] = useState<any[]>([]);
+  const [recordingStartTime, setRecordingStartTime] = useState<Date | null>(null);
+  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const recordedDataRef = useRef<any[]>([]);
+
+  // Polling interval ref for devices
+  const devicesPollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Polling interval ref for ML alerts
+  const mlAlertsPollingRef = useRef<NodeJS.Timeout | null>(null);
 
   // Listen to alerts real-time
   useEffect(() => {
@@ -43,33 +75,148 @@ export default function Dashboard() {
     const unsubscribe = listenToUserAlerts((data) => {
       console.log("[Dashboard] Alerts updated:", data.length);
       setAlerts(data);
-      setLoading(false);
     });
-    setUnsubscribeAlerts(() => unsubscribe);
+    setUnsubscribeAlerts(unsubscribe);
     return unsubscribe;
   }, []);
 
-  // Listen to devices real-time
+  // Poll ML alerts with fallback (onSnapshot not working reliably)
   useEffect(() => {
-    console.log("[Dashboard] Setting up device listener");
-    const unsubscribe = listenToUserDevices((data) => {
-      console.log("[Dashboard] Devices updated:", data.length);
-      console.log("[Dashboard] Device data:", JSON.stringify(data, null, 2));
-      setDevices(data);
+    console.log("[Dashboard] Setting up ML alerts polling (fallback from real-time listener)");
 
-      // Unsubscribe from previous readings listeners
-      readingsUnsubscribes.forEach((unsub) => unsub());
+    const pollMLAlerts = async () => {
+      try {
+        const userId = auth.currentUser?.uid;
+        if (!userId) return;
 
-      // Only setup readings listeners if user is still authenticated
-      if (!auth.currentUser) {
-        console.log("[Dashboard] User not authenticated - skipping readings listeners");
-        setReadingsUnsubscribes([]);
-        return;
+        const firestore = getFirestore();
+        const alertsRef = collection(firestore, 'users', userId, 'mlAlerts');
+        const snapshot = await getDocs(alertsRef);
+        
+        const alerts = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as MLAlert[];
+
+        console.log("[Dashboard] ML Alerts polling: Found", alerts.length, "alerts");
+        setMLAlerts(alerts);
+        setLoading(false);
+
+        // Show local notification for NEW alerts only
+        alerts.forEach((alert) => {
+          if (alert.id && !shownNotificationsRef.current.has(alert.id)) {
+            console.log("[Dashboard] New alert detected, showing notification:", alert.id);
+            
+            try {
+              // Schedule local notification immediately
+              Notifications.scheduleNotificationAsync({
+                content: {
+                  title: `🤖 ${alert.riskLabel?.toUpperCase() || "ALERT"}`,
+                  body: `${alert.detectedObjects?.join(", ") || "Detection"} - ${alert.deviceIdentifier || "Unknown Device"}`,
+                  badge: 1,
+                  sound: true,
+                  data: {
+                    alertId: alert.id,
+                    riskLabel: alert.riskLabel,
+                    detectedObjects: alert.detectedObjects?.join(", "),
+                  },
+                },
+                trigger: {
+                  type: "time" as const,
+                  seconds: 1, // Show immediately
+                },
+              }).then(() => {
+                console.log("[Dashboard] ✅ Notification scheduled for alert:", alert.id);
+              }).catch((error) => {
+                console.error("[Dashboard] ❌ Failed to schedule notification:", error);
+              });
+            } catch (error) {
+              console.error("[Dashboard] Exception scheduling notification:", error);
+            }
+            
+            shownNotificationsRef.current.add(alert.id);
+          }
+        });
+      } catch (error) {
+        console.error("[Dashboard] Error polling ML alerts:", error);
       }
+    };
 
-      // Setup readings listeners for each device
-      const newUnsubscribes: (() => void)[] = [];
-      data.forEach((device) => {
+    // Poll every 5 seconds for ML alerts
+    pollMLAlerts();
+    mlAlertsPollingRef.current = setInterval(pollMLAlerts, 5000);
+
+    return () => {
+      if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
+    };
+  }, []);
+
+  // Setup notification tap handler to navigate to alert details
+  useEffect(() => {
+    console.log("[Dashboard] Setting up notification tap handler");
+    
+    const notificationTapSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const alertId = response.notification.request.content.data?.alertId;
+      
+      if (alertId) {
+        console.log("[Dashboard] Notification tapped for alert:", alertId);
+        
+        // Find the alert in mlAlerts
+        const alert = mlAlerts.find((a) => a.id === alertId);
+        if (alert) {
+          console.log("[Dashboard] Found alert, opening detail modal");
+          setSelectedMLAlert(alert);
+          setShowMLAlertDetailModal(true);
+          setActiveTab("alerts");
+        } else {
+          console.warn("[Dashboard] Alert not found in mlAlerts for ID:", alertId);
+        }
+      }
+    });
+
+    return () => {
+      notificationTapSubscription.remove();
+    };
+  }, [mlAlerts]);
+
+  // Listen to devices with polling (fallback from onSnapshot)
+  useEffect(() => {
+    console.log("[Dashboard] Setting up device polling (fallback from real-time listener)");
+    
+    // Initial fetch
+    const pollDevices = async () => {
+      try {
+        const db = getFirestore();
+        const devicesRef = collection(db, "devices");
+        const snapshot = await getDocs(devicesRef);
+        
+        const allDevices = snapshot.docs.map((doc) => {
+          const data = doc.data();
+          return { id: doc.id, ...data };
+        });
+        
+        // Filter for current user
+        const userDevices = allDevices.filter(d => d.userId === auth.currentUser?.uid);
+        
+        console.log("[Dashboard] Polling: Found", userDevices.length, "devices for user");
+        setDevices(userDevices);
+        setLoading(false);
+
+        // Unsubscribe from previous readings listeners
+        readingsUnsubscribes.forEach((unsub) => {
+          if (typeof unsub === 'function') unsub();
+        });
+
+        // Only setup readings listeners if user is still authenticated
+        if (!auth.currentUser) {
+          console.log("[Dashboard] User not authenticated - skipping readings listeners");
+          setReadingsUnsubscribes([]);
+          return;
+        }
+
+        // Setup readings listeners for each device
+        const newUnsubscribes: (() => void)[] = [];
+        userDevices.forEach((device) => {
         const readingsUnsub = listenToDeviceReadings(device.id, (readings) => {
           setDeviceReadings((prev) => ({
             ...prev,
@@ -77,12 +224,22 @@ export default function Dashboard() {
           }));
         }, 5);
         newUnsubscribes.push(readingsUnsub);
-      });
-      setReadingsUnsubscribes(newUnsubscribes);
-    });
-    setUnsubscribeDevices(() => unsubscribe);
-    return unsubscribe;
-  }, []);
+        });
+        setReadingsUnsubscribes(newUnsubscribes);
+      } catch (error) {
+        console.error("[Dashboard] Error polling devices:", error);
+        setLoading(false);
+      }
+    };
+
+    // Poll every 15 seconds (was 5s, causing rate limit)
+    pollDevices();
+    devicesPollingRef.current = setInterval(pollDevices, 15000);
+
+    return () => {
+      if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
+    };
+  }, [readingsUnsubscribes]);
 
   // Cleanup listeners when user logs out
   useEffect(() => {
@@ -91,19 +248,26 @@ export default function Dashboard() {
         // User logged out - cleanup all listeners
         console.log("[Dashboard] Auth state changed to null - cleaning up listeners");
         if (unsubscribeAlerts) {
-          unsubscribeAlerts();
+          if (typeof unsubscribeAlerts === 'function') unsubscribeAlerts();
           setUnsubscribeAlerts(null);
         }
+        // ML alerts now uses polling, not listener
+        setUnsubscribeMLAlerts(null);
+        
         if (unsubscribeDevices) {
-          unsubscribeDevices();
+          if (typeof unsubscribeDevices === 'function') unsubscribeDevices();
           setUnsubscribeDevices(null);
         }
-        readingsUnsubscribes.forEach((unsub) => unsub());
+        if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
+        if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
+        readingsUnsubscribes.forEach((unsub) => {
+          if (typeof unsub === 'function') unsub();
+        });
         setReadingsUnsubscribes([]);
       }
     });
     return unsubscribeAuth;
-  }, [unsubscribeAlerts, unsubscribeDevices, readingsUnsubscribes]);
+  }, [unsubscribeAlerts, unsubscribeMLAlerts, unsubscribeDevices, readingsUnsubscribes]);
 
   // Initialize push notifications
   useEffect(() => {
@@ -118,10 +282,16 @@ export default function Dashboard() {
     try {
       setLoggingOut(true);
       // Unsubscribe from all listeners before logout
-      if (unsubscribeAlerts) unsubscribeAlerts();
-      if (unsubscribeDevices) unsubscribeDevices();
+      if (unsubscribeAlerts && typeof unsubscribeAlerts === 'function') unsubscribeAlerts();
+      if (unsubscribeMLAlerts && typeof unsubscribeMLAlerts === 'function') unsubscribeMLAlerts();
+      if (unsubscribeDevices && typeof unsubscribeDevices === 'function') unsubscribeDevices();
+      // Clear polling intervals
+      if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
+      if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
       // Unsubscribe from all readings listeners
-      readingsUnsubscribes.forEach((unsub) => unsub());
+      readingsUnsubscribes.forEach((unsub) => {
+        if (typeof unsub === 'function') unsub();
+      });
       await signOut(auth);
     } catch (err) {
       console.error("❌ Logout failed:", err);
@@ -139,7 +309,13 @@ export default function Dashboard() {
     if (!selectedAlert || selectedRating === null || selectedAccuracy === null) return;
     
     try {
-      await updateAlertRating(selectedAlert.deviceId, selectedAlert.id, selectedRating, selectedAccuracy);
+      // For ML alerts (from users/{userId}/mlAlerts collection)
+      if (!selectedAlert.deviceId) {
+        await updateMLAlertRating(selectedAlert.id, selectedRating, selectedAccuracy);
+      } else {
+        // For sensor alerts (from devices/{deviceId}/alerts collection)
+        await updateAlertRating(selectedAlert.deviceId, selectedAlert.id, selectedRating, selectedAccuracy);
+      }
       setShowRatingModal(false);
       setSelectedAlert(null);
       setSelectedRating(null);
@@ -244,6 +420,266 @@ export default function Dashboard() {
     return readings[0];
   };
 
+  // Send test notification for a device
+  const handleSendTestNotification = async (device: any) => {
+    try {
+      setSendingTestNotification(device.id);
+      const userId = auth.currentUser?.uid;
+      
+      if (!userId) {
+        Alert.alert('Error', 'User not authenticated');
+        return;
+      }
+
+      const deviceName = device.label || device.name || 'Unnamed Device';
+      
+      // Create test alert data
+      const testAlert: MLAlert = {
+        deviceId: device.id,
+        deviceIdentifier: deviceName,
+        riskLabel: 'Test',
+        detectedObjects: ['Test Notification'],
+        description: [`This is a test notification from ${deviceName}`, 'Testing notification system'],
+        confidenceScore: 0.95,
+        screenshots: [],
+        timestamp: new Date() as any,
+        alertGeneratedAt: Date.now(),
+        modelVersion: 'test-v1.0',
+        acknowledged: false
+      };
+
+      // Save to Firestore (the listener will automatically send notification)
+      const firestore = getFirestore();
+      const alertRef = await addDoc(
+        collection(firestore, 'users', userId, 'mlAlerts'),
+        {
+          ...testAlert,
+          timestamp: serverTimestamp()
+        }
+      );
+
+      console.log('[TestNotification] Alert saved to Firestore:', alertRef.id);
+      console.log('[TestNotification] Notification will be sent by listener');
+      Alert.alert('✅ Test Sent', `Test notification sent for ${deviceName}`);
+      
+    } catch (error: any) {
+      console.error('[TestNotification] Error:', error);
+      Alert.alert('Error', `Failed to send test notification: ${error.message}`);
+    } finally {
+      setSendingTestNotification(null);
+    }
+  };
+
+  // ============================================
+  // DATA RECORDING FUNCTIONS
+  // ============================================
+
+  const startRecording = async () => {
+    if (!selectedDeviceForRecording) return;
+
+    setIsRecording(true);
+    setRecordedData([]);
+    recordedDataRef.current = [];
+    setRecordingStartTime(new Date());
+    setShowRecordingModal(false);
+
+    console.log('[Recording] Started for device:', selectedDeviceForRecording.name, 'Duration:', recordingDuration, 'min');
+
+    Alert.alert(
+      "Recording Started",
+      `Recording sensor data for ${recordingDuration} minutes...`,
+      [{ text: "OK" }]
+    );
+
+    // Fetch sensor data immediately, then every 5 seconds
+    const fetchData = async () => {
+      try {
+        const API_URL = process.env.EXPO_PUBLIC_API_URL;
+        const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
+        const userId = auth.currentUser?.uid;
+
+        console.log('[Recording] Fetching data...', API_URL);
+
+        // Fetch all sensors for this device
+        const sensorsResponse = await fetch(
+          `${API_URL}/api/sensors?deviceId=${selectedDeviceForRecording.id}`,
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': API_KEY || '',
+              'x-user-id': userId || '',
+            },
+          }
+        );
+
+        if (!sensorsResponse.ok) {
+          console.log('[Recording] Sensors fetch failed:', sensorsResponse.status);
+          throw new Error('Failed to fetch sensors');
+        }
+        
+        const sensors = await sensorsResponse.json();
+        console.log('[Recording] Found sensors:', sensors.length);
+
+        // Fetch latest reading for each sensor
+        for (const sensor of sensors) {
+          const readingsResponse = await fetch(
+            `${API_URL}/api/readings/${sensor.sensor_id}?hours=1&limit=1`,
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': API_KEY || '',
+                'x-user-id': userId || '',
+              },
+            }
+          );
+
+          if (readingsResponse.ok) {
+            const readings = await readingsResponse.json();
+            if (readings.length > 0) {
+              const dataPoint = {
+                deviceId: selectedDeviceForRecording.id,
+                deviceName: selectedDeviceForRecording.label || selectedDeviceForRecording.name,
+                sensorId: sensor.sensor_id,
+                sensorName: sensor.sensor_name,
+                sensorType: sensor.sensor_type,
+                timestamp: new Date(readings[0].time),
+                value: readings[0].value,
+                unit: sensor.unit,
+              };
+              console.log('[Recording] Data point:', sensor.sensor_name, readings[0].value);
+              recordedDataRef.current.push(dataPoint);
+              setRecordedData(prev => [...prev, dataPoint]);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Recording] Error fetching data:', error);
+      }
+    };
+
+    // Fetch immediately
+    await fetchData();
+    
+    // Then fetch every 5 seconds
+    const intervalId = setInterval(fetchData, 5000);
+
+    recordingIntervalRef.current = intervalId;
+
+    // Stop recording after specified duration
+    setTimeout(() => {
+      stopRecording();
+    }, recordingDuration * 60 * 1000);
+  };
+
+  const stopRecording = () => {
+    const dataCount = recordedDataRef.current.length;
+    console.log('[Recording] Stopping... Total data points:', dataCount);
+    
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current);
+      recordingIntervalRef.current = null;
+    }
+
+    setIsRecording(false);
+
+    if (dataCount > 0) {
+      exportToCSV();
+    } else {
+      console.log('[Recording] No data captured!');
+      Alert.alert('No Data', 'No data was recorded during this session. Please check if the device is sending data.');
+    }
+  };
+
+  const exportToCSV = async () => {
+    const dataToExport = recordedDataRef.current;
+    if (dataToExport.length === 0) {
+      console.log('[Export] No data in ref');
+      return;
+    }
+
+    try {
+      console.log('[Export] Exporting', dataToExport.length, 'data points');
+      
+      const firstTimestamp = dataToExport[0].timestamp.getTime();
+      const lastTimestamp = dataToExport[dataToExport.length - 1].timestamp.getTime();
+      const deviceName = dataToExport[0].deviceName.replace(/[^a-z0-9]/gi, '_');
+      
+      const fileName = `${deviceName}_${firstTimestamp}_${lastTimestamp}.csv`;
+
+      // Create CSV content
+      const csvHeader = 'Timestamp,Device Name,Sensor Name,Sensor Type,Value,Unit\n';
+      const csvRows = dataToExport.map(row => 
+        `${row.timestamp.toISOString()},${row.deviceName},${row.sensorName},${row.sensorType},${row.value},${row.unit}`
+      ).join('\n');
+
+      const csvContent = csvHeader + csvRows;
+      console.log('[Export] CSV size:', csvContent.length, 'bytes');
+
+      if (Platform.OS === 'android') {
+        // Use react-native-fs for reliable file system access on Android
+        const downloadsPath = RNFS.DownloadDirectoryPath;
+        const filePath = `${downloadsPath}/${fileName}`;
+        
+        console.log('[Export] Writing to Downloads:', filePath);
+        
+        // Write CSV to Downloads folder
+        await RNFS.writeFile(filePath, csvContent, 'utf8');
+        
+        console.log('[Export] File written successfully');
+
+        Alert.alert(
+          'Export Complete',
+          `Recorded ${dataToExport.length} data points.\n\nFile saved to Downloads:\n${fileName}\n\nYou can open it with Excel, Google Sheets, or any spreadsheet app.`,
+          [
+            { 
+              text: 'Open File', 
+              onPress: () => {
+                // Try to share/open the file
+                Share.share({
+                  title: 'Open CSV File',
+                  message: `File saved: ${fileName}`,
+                  url: `file://${filePath}`,
+                }).catch(err => console.log('[Export] Share error:', err));
+              }
+            },
+            { text: 'OK' }
+          ]
+        );
+      } else {
+        // Fallback for iOS or web
+        const result = await Share.share({
+          title: 'Export Sensor Data CSV',
+          message: `${fileName}\n\n${csvContent}`,
+        });
+
+        if (result.action === Share.sharedAction) {
+          Alert.alert(
+            'Export Complete',
+            `Recorded ${dataToExport.length} data points.\n\nShared as text - copy and paste into Excel/Sheets.`,
+            [{ text: 'OK' }]
+          );
+        }
+      }
+
+      // Clear recorded data
+      setRecordedData([]);
+      recordedDataRef.current = [];
+      setRecordingStartTime(null);
+    } catch (error) {
+      console.error('[Export] Error:', error);
+      Alert.alert('Export Failed', `Could not export data: ${error.message}`);
+    }
+  };
+
+  // Clean up recording on unmount
+  useEffect(() => {
+    return () => {
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+      }
+    };
+  }, []);
+
   const user = auth.currentUser;
 
   return (
@@ -278,8 +714,13 @@ export default function Dashboard() {
           onPress={() => setActiveTab("alerts")}
         >
           <View style={{ flexDirection: "row", alignItems: "center" }}>
-            <MaterialIcons name="notifications" size={20} color="#ffffff" style={{ marginRight: 6 }} />
+            <MaterialIcons name="warning" size={20} color="#ffffff" style={{ marginRight: 6 }} />
             <Text style={styles.navItemText}>Alerts</Text>
+            {mlAlerts.length > 0 && (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>{mlAlerts.length}</Text>
+              </View>
+            )}
           </View>
         </TouchableOpacity>
         <TouchableOpacity
@@ -296,48 +737,87 @@ export default function Dashboard() {
       {/* Alerts Tab */}
       {activeTab === "alerts" && (
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Alert History</Text>
+          <Text style={styles.sectionTitle}>🤖 Detection Alerts</Text>
 
           {loading ? (
             <ActivityIndicator size="large" style={styles.loader} />
-          ) : alerts.length === 0 ? (
+          ) : mlAlerts.length === 0 ? (
             <View style={styles.emptyState}>
               <Text style={styles.emptyText}>No alerts yet</Text>
-              <Text style={styles.emptySubtext}>Alerts will appear here when readings exceed thresholds</Text>
+              <Text style={styles.emptySubtext}>Alerts from remote ML models will appear here</Text>
             </View>
           ) : (
             <FlatList
-              data={alerts}
+              data={mlAlerts}
               scrollEnabled={false}
-              keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <TouchableOpacity 
-                  style={styles.alertCard}
-                  onPress={() => handleOpenRatingModal(item)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.alertHeader}>
-                    <Text style={styles.alertDeviceLabel}>{item.deviceLabel}</Text>
-                    <Text style={styles.alertTimestamp}>
-                      {new Date(item.timestamp?.toDate?.() || item.timestamp).toLocaleString()}
-                    </Text>
-                  </View>
-                  <Text style={styles.alertMessage}>{item.message}</Text>
-                  {item.type && (
-                    <Text style={styles.alertType}>Type: {item.type}</Text>
-                  )}
-                  {item.rating ? (
-                    <View style={styles.alertFeedbackContainer}>
-                      <Text style={styles.alertAccuracy}>
-                        {item.accuracy ? "✅ Accurate" : "❌ Inaccurate"}
+              keyExtractor={(item) => item.id || `${item.deviceId}-${item.timestamp}`}
+              renderItem={({ item }) => {
+                const riskColors: { [key: string]: string } = {
+                  critical: "#FF0000",
+                  high: "#FF6B00",
+                  medium: "#FFD700",
+                  low: "#00AA00",
+                };
+                const riskEmojis: { [key: string]: string } = {
+                  critical: "🔴",
+                  high: "🟠",
+                  medium: "🟡",
+                  low: "🟢",
+                };
+                const riskLevel = item.riskLabel?.toLowerCase() || "medium";
+
+                return (
+                  <TouchableOpacity
+                    style={[
+                      styles.mlAlertCard,
+                      { borderLeftColor: riskColors[riskLevel] || "#FFD700", borderLeftWidth: 4 },
+                      // Add background color based on accuracy feedback
+                      item.accuracyFeedback === true && { backgroundColor: "#E8F5E9" }, // Light green for accurate
+                      item.accuracyFeedback === false && { backgroundColor: "#FFEBEE" }, // Light red for inaccurate
+                    ]}
+                    onPress={() => {
+                      setSelectedMLAlert(item);
+                      setShowMLAlertDetailModal(true);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.mlAlertHeader}>
+                      <Text style={styles.mlAlertTitle}>
+                        {riskEmojis[riskLevel]} {item.riskLabel} - {item.deviceIdentifier}
                       </Text>
-                      <Text style={styles.alertRating}>⭐ Rating: {item.rating}/10</Text>
+                      <Text style={styles.mlAlertTime}>
+                        {item.timestamp?.toDate?.().toLocaleTimeString?.()}
+                      </Text>
                     </View>
-                  ) : (
-                    <Text style={styles.alertRatingPrompt}>👆 Tap to rate</Text>
-                  )}
-                </TouchableOpacity>
-              )}
+
+                    <Text style={styles.mlAlertObjects}>
+                      🔍 {item.detectedObjects?.join(", ") || "No objects"}
+                    </Text>
+
+                    {item.description && item.description.length > 0 && (
+                      <Text style={styles.mlAlertDescription} numberOfLines={2}>
+                        📝 {item.description[0]}
+                      </Text>
+                    )}
+
+                    <View style={styles.mlAlertFooter}>
+                      {item.confidenceScore !== null && item.confidenceScore !== undefined && (
+                        <Text style={styles.mlAlertConfidence}>
+                          📊 {(item.confidenceScore * 100).toFixed(0)}%
+                        </Text>
+                      )}
+                      {item.screenshots && item.screenshots.length > 0 && (
+                        <Text style={styles.mlAlertScreenshot}>
+                          📸 {item.screenshots.length} image
+                        </Text>
+                      )}
+                      {item.acknowledged && (
+                        <Text style={styles.mlAlertAcknowledged}>✅</Text>
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                );
+              }}
             />
           )}
         </View>
@@ -393,35 +873,68 @@ export default function Dashboard() {
                     </View>
 
                     <View style={styles.deviceActions}>
-                      <TouchableOpacity
-                        style={[styles.actionBtn, styles.testBtn]}
-                        onPress={async () => {
-                          try {
-                            await triggerTestAlert(item.id, item.name || item.label || item.id);
-                            Alert.alert("Success", "Alert notification sent!");
-                          } catch (error) {
-                            console.error("Error sending alert:", error);
-                            Alert.alert("Error", "Failed to send alert notification");
-                          }
-                        }}
-                      >
-                        <Text style={styles.actionBtnText}>🔔</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.actionBtn, styles.editBtn]}
-                        onPress={() => {
-                          setSelectedDeviceForVideo(item);
-                          setShowVideoPlayer(true);
-                        }}
-                      >
-                        <Text style={styles.actionBtnText}>📹</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.actionBtn, styles.deleteBtn]}
-                        onPress={() => handleUnclaimDevice(item.id, item.label)}
-                      >
-                        <Text style={styles.actionBtnText}>🗑️</Text>
-                      </TouchableOpacity>
+                      <View style={styles.actionRow}>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.sensorBtn]}
+                          onPress={() => {
+                            router.push({
+                              pathname: "/sensor-list",
+                              params: {
+                                deviceId: item.id,
+                                deviceName: item.label || item.name || "Unnamed Device",
+                              },
+                            });
+                          }}
+                        >
+                          <Text style={styles.actionBtnText}>📊</Text>
+                          <Text style={styles.actionBtnLabel}>Sensors</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.editBtn]}
+                          onPress={() => {
+                            setSelectedDeviceForVideo(item);
+                            setShowVideoPlayer(true);
+                          }}
+                        >
+                          <Text style={styles.actionBtnText}>📹</Text>
+                          <Text style={styles.actionBtnLabel}>Camera</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={styles.actionRow}>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.recordBtn]}
+                          onPress={() => {
+                            setSelectedDeviceForRecording(item);
+                            setShowRecordingModal(true);
+                          }}
+                        >
+                          <Text style={styles.actionBtnText}>{isRecording && selectedDeviceForRecording?.id === item.id ? '⏹️' : '⏺️'}</Text>
+                          <Text style={styles.actionBtnLabel}>Record</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.testBtn]}
+                          onPress={() => handleSendTestNotification(item)}
+                          disabled={sendingTestNotification === item.id}
+                        >
+                          {sendingTestNotification === item.id ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : (
+                            <>
+                              <Text style={styles.actionBtnText}>🧪</Text>
+                              <Text style={styles.actionBtnLabel}>Test</Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                      <View style={styles.actionRow}>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.deleteBtn]}
+                          onPress={() => handleUnclaimDevice(item.id, item.label)}
+                        >
+                          <Text style={styles.actionBtnText}>🗑️</Text>
+                          <Text style={styles.actionBtnLabel}>Remove</Text>
+                        </TouchableOpacity>
+                      </View>
                     </View>
                   </View>
                 );
@@ -621,6 +1134,262 @@ export default function Dashboard() {
         </View>
       </Modal>
 
+      {/* ML Alert Detail Modal */}
+      <Modal
+        visible={showMLAlertDetailModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          setShowMLAlertDetailModal(false);
+          setSelectedMLAlert(null);
+          setMLAlertRating(null);
+          setMLAlertAccuracy(null);
+        }}
+      >
+        {selectedMLAlert && (
+          <View style={styles.modalOverlay}>
+            <View style={styles.mlAlertDetailModal}>
+              <ScrollView showsVerticalScrollIndicator={true}>
+                {/* Header */}
+                <View style={styles.mlAlertDetailHeader}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setShowMLAlertDetailModal(false);
+                      setSelectedMLAlert(null);
+                      setMLAlertRating(null);
+                      setMLAlertAccuracy(null);
+                    }}
+                  >
+                    <Text style={styles.mlAlertCloseBtn}>✕</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.mlAlertDetailTitle}>
+                    {selectedMLAlert.riskLabel} Alert
+                  </Text>
+                </View>
+
+                {/* Device Info */}
+                <View style={styles.mlAlertDetailSection}>
+                  <Text style={styles.mlAlertDetailLabel}>Device</Text>
+                  <Text style={styles.mlAlertDetailValue}>{selectedMLAlert.deviceIdentifier}</Text>
+                  <Text style={styles.mlAlertDetailSubtext}>{selectedMLAlert.deviceId}</Text>
+                </View>
+
+                {/* Time */}
+                <View style={styles.mlAlertDetailSection}>
+                  <Text style={styles.mlAlertDetailLabel}>Alert Time</Text>
+                  <Text style={styles.mlAlertDetailValue}>
+                    {selectedMLAlert.timestamp?.toDate?.().toLocaleString?.() || new Date(selectedMLAlert.alertGeneratedAt || 0).toLocaleString()}
+                  </Text>
+                </View>
+
+                {/* Risk Level */}
+                <View style={styles.mlAlertDetailSection}>
+                  <Text style={styles.mlAlertDetailLabel}>Risk Level</Text>
+                  <Text style={[
+                    styles.mlAlertDetailValue,
+                    {
+                      color: selectedMLAlert.riskLabel.toLowerCase() === "critical" ? "#FF0000"
+                        : selectedMLAlert.riskLabel.toLowerCase() === "high" ? "#FF6B00"
+                        : selectedMLAlert.riskLabel.toLowerCase() === "medium" ? "#FFD700"
+                        : "#00AA00",
+                    }
+                  ]}>
+                    {selectedMLAlert.riskLabel}
+                  </Text>
+                </View>
+
+                {/* Detected Objects */}
+                <View style={styles.mlAlertDetailSection}>
+                  <Text style={styles.mlAlertDetailLabel}>Detected Objects</Text>
+                  <Text style={styles.mlAlertDetailValue}>
+                    {selectedMLAlert.detectedObjects?.join(", ") || "None"}
+                  </Text>
+                </View>
+
+                {/* Description */}
+                {selectedMLAlert.description && selectedMLAlert.description.length > 0 && (
+                  <View style={styles.mlAlertDetailSection}>
+                    <Text style={styles.mlAlertDetailLabel}>Details</Text>
+                    {selectedMLAlert.description.map((desc, idx) => (
+                      <Text key={idx} style={styles.mlAlertDetailValue}>
+                        • {desc}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+
+                {/* Confidence Score */}
+                {selectedMLAlert.confidenceScore !== null && selectedMLAlert.confidenceScore !== undefined && (
+                  <View style={styles.mlAlertDetailSection}>
+                    <Text style={styles.mlAlertDetailLabel}>Model Confidence</Text>
+                    <Text style={styles.mlAlertDetailValue}>
+                      {(selectedMLAlert.confidenceScore * 100).toFixed(1)}%
+                    </Text>
+                  </View>
+                )}
+
+                {/* Screenshots */}
+                {selectedMLAlert.screenshots && selectedMLAlert.screenshots.length > 0 && (
+                  <View style={styles.mlAlertDetailSection}>
+                    <Text style={styles.mlAlertDetailLabel}>Screenshots ({selectedMLAlert.screenshots.length})</Text>
+                    {selectedMLAlert.screenshots.map((img, idx) => (
+                      <Text key={idx} style={styles.mlAlertDetailValue}>
+                        📸 {img}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+
+                {/* Model Version */}
+                {selectedMLAlert.modelVersion && (
+                  <View style={styles.mlAlertDetailSection}>
+                    <Text style={styles.mlAlertDetailLabel}>Model Version</Text>
+                    <Text style={styles.mlAlertDetailValue}>{selectedMLAlert.modelVersion}</Text>
+                  </View>
+                )}
+
+                {/* Rating Section */}
+                <View style={styles.mlAlertDetailSection}>
+                  <Text style={styles.mlAlertDetailLabel}>Your Feedback</Text>
+                  
+                  {!selectedMLAlert.rating ? (
+                    <>
+                      <Text style={styles.mlAlertDetailSubtext}>Is this alert accurate?</Text>
+                      <View style={styles.accuracyButtonsContainer}>
+                        <TouchableOpacity
+                          style={[
+                            styles.accuracyButton,
+                            styles.accuracyButtonYes,
+                            mlAlertAccuracy === true && styles.accuracyButtonSelected,
+                          ]}
+                          onPress={() => setMLAlertAccuracy(true)}
+                        >
+                          <Text style={styles.accuracyButtonText}>✅ Accurate</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.accuracyButton,
+                            styles.accuracyButtonNo,
+                            mlAlertAccuracy === false && styles.accuracyButtonSelected,
+                          ]}
+                          onPress={() => setMLAlertAccuracy(false)}
+                        >
+                          <Text style={styles.accuracyButtonText}>❌ Inaccurate</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {mlAlertAccuracy !== null && (
+                        <View style={{ marginTop: 20 }}>
+                          <Text style={styles.mlAlertDetailSubtext}>Rate this alert (1-10)</Text>
+                          <View style={styles.ratingScale}>
+                            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((rating) => (
+                              <TouchableOpacity
+                                key={rating}
+                                style={[
+                                  styles.ratingButton,
+                                  mlAlertRating === rating && styles.ratingButtonSelected,
+                                ]}
+                                onPress={() => setMLAlertRating(rating)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.ratingButtonText,
+                                    mlAlertRating === rating && styles.ratingButtonTextSelected,
+                                  ]}
+                                >
+                                  {rating}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      )}
+                    </>
+                  ) : (
+                    <View>
+                      <Text style={styles.mlAlertDetailValue}>
+                        {selectedMLAlert.ratingAccuracy ? "✅ Marked as Accurate" : "❌ Marked as Inaccurate"}
+                      </Text>
+                      <Text style={styles.mlAlertDetailValue}>
+                        ⭐ Rating: {selectedMLAlert.rating}/10
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </ScrollView>
+
+              {/* Action Buttons */}
+              <View style={styles.mlAlertDetailButtons}>
+                <TouchableOpacity
+                  style={[styles.button, styles.cancelButton]}
+                  onPress={() => {
+                    setShowMLAlertDetailModal(false);
+                    setSelectedMLAlert(null);
+                    setMLAlertRating(null);
+                    setMLAlertAccuracy(null);
+                  }}
+                >
+                  <Text style={styles.buttonText}>Close</Text>
+                </TouchableOpacity>
+
+                {!selectedMLAlert.rating && mlAlertAccuracy !== null && mlAlertRating !== null && (
+                  <TouchableOpacity
+                    style={[styles.button, styles.submitButton]}
+                    onPress={async () => {
+                      try {
+                        // For user-level ML alerts (from polling), use updateMLAlertRating directly
+                        if (!selectedMLAlert.deviceId) {
+                          await updateMLAlertRating(
+                            selectedMLAlert.id!,
+                            mlAlertRating,
+                            mlAlertAccuracy
+                          );
+                        } else {
+                          // For device-level alerts, use rateMLAlert
+                          await rateMLAlert(
+                            selectedMLAlert.deviceId,
+                            selectedMLAlert.id!,
+                            mlAlertRating,
+                            mlAlertAccuracy
+                          );
+                        }
+                        Alert.alert("✅ Feedback Saved", "Thank you for rating this alert");
+                        setShowMLAlertDetailModal(false);
+                        setSelectedMLAlert(null);
+                        setMLAlertRating(null);
+                        setMLAlertAccuracy(null);
+                      } catch (error) {
+                        Alert.alert("Error", "Failed to save feedback");
+                      }
+                    }}
+                  >
+                    <Text style={styles.buttonText}>Submit Feedback</Text>
+                  </TouchableOpacity>
+                )}
+
+                {selectedMLAlert.rating && (
+                  <TouchableOpacity
+                    style={[styles.button, styles.deleteButton]}
+                    onPress={async () => {
+                      try {
+                        await deleteAlert(selectedMLAlert.deviceId, selectedMLAlert.id!);
+                        Alert.alert("✅ Deleted", "Alert has been removed");
+                        setShowMLAlertDetailModal(false);
+                        setSelectedMLAlert(null);
+                      } catch (error) {
+                        Alert.alert("Error", "Failed to delete alert");
+                      }
+                    }}
+                  >
+                    <Text style={styles.buttonText}>Delete</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          </View>
+        )}
+      </Modal>
+
       {/* Profile Modal */}
       <Modal
         visible={showProfileModal}
@@ -730,6 +1499,78 @@ export default function Dashboard() {
           </View>
         </View>
       </Modal>
+
+      {/* Data Recording Settings Modal */}
+      <Modal
+        visible={showRecordingModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowRecordingModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>⏺️ Record Sensor Data</Text>
+            <Text style={styles.modalSubtitle}>
+              {selectedDeviceForRecording?.label || selectedDeviceForRecording?.name}
+            </Text>
+
+            <View style={styles.recordingOptions}>
+              <Text style={styles.optionLabel}>Recording Duration:</Text>
+              
+              <TouchableOpacity
+                style={[
+                  styles.durationButton,
+                  recordingDuration === 5 && styles.durationButtonActive
+                ]}
+                onPress={() => setRecordingDuration(5)}
+              >
+                <Text style={[
+                  styles.durationButtonText,
+                  recordingDuration === 5 && styles.durationButtonTextActive
+                ]}>
+                  5 Minutes
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.durationButton,
+                  recordingDuration === 10 && styles.durationButtonActive
+                ]}
+                onPress={() => setRecordingDuration(10)}
+              >
+                <Text style={[
+                  styles.durationButtonText,
+                  recordingDuration === 10 && styles.durationButtonTextActive
+                ]}>
+                  10 Minutes
+                </Text>
+              </TouchableOpacity>
+
+              <Text style={styles.recordingInfo}>
+                ℹ️ Data will be collected every 5 seconds and saved as CSV file
+              </Text>
+            </View>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => setShowRecordingModal(false)}
+              >
+                <Text style={styles.modalButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.startButton]}
+                onPress={startRecording}
+              >
+                <Text style={[styles.modalButtonText, styles.startButtonText]}>
+                  Start Recording
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
     </LinearGradient>
   );
@@ -791,9 +1632,6 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     borderLeftWidth: 4,
     borderLeftColor: "#7C3AED",
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -837,21 +1675,28 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   deviceActions: {
+    marginTop: 12,
+    gap: 10,
+  },
+  actionRow: {
     flexDirection: "row",
-    gap: 8,
-    marginLeft: 12,
+    gap: 10,
   },
   actionBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
+    flex: 1,
+    height: 70,
+    borderRadius: 12,
     justifyContent: "center",
     alignItems: "center",
-    borderWidth: 1,
+    borderWidth: 2,
   },
   editBtn: {
     backgroundColor: "#E3F2FD",
     borderColor: "#2196F3",
+  },
+  sensorBtn: {
+    backgroundColor: "#F3E5F5",
+    borderColor: "#9C27B0",
   },
   testBtn: {
     backgroundColor: "#FCE4EC",
@@ -862,7 +1707,13 @@ const styles = StyleSheet.create({
     borderColor: "#F44336",
   },
   actionBtnText: {
-    fontSize: 16,
+    fontSize: 24,
+    marginBottom: 4,
+  },
+  actionBtnLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#333",
   },
   section: {
     marginBottom: 30,
@@ -1445,5 +2296,240 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
     fontSize: 14,
   },
-});
+  // ML Alert Styles
+  badge: {
+    backgroundColor: "#FF5252",
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    marginLeft: 8,
+  },
+  badgeText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
+  mlAlertCard: {
+    backgroundColor: "#fff",
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 12,
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+  },
+  mlAlertHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  mlAlertTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#333",
+    flex: 1,
+  },
+  mlAlertTime: {
+    fontSize: 12,
+    color: "#999",
+    marginLeft: 8,
+  },
+  mlAlertObjects: {
+    fontSize: 14,
+    color: "#666",
+    marginBottom: 8,
+    fontWeight: "500",
+  },
+  mlAlertDescription: {
+    fontSize: 13,
+    color: "#777",
+    marginBottom: 8,
+    lineHeight: 18,
+  },
+  mlAlertFooter: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#eee",
+  },
+  mlAlertConfidence: {
+    fontSize: 12,
+    color: "#666",
+    fontWeight: "500",
+  },
+  mlAlertScreenshot: {
+    fontSize: 12,
+    color: "#666",
+    fontWeight: "500",
+  },
+  mlAlertAcknowledged: {
+    fontSize: 16,
+  },
+  mlAlertDetailModal: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: "85%",
+    marginTop: "auto",
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 100,
+  },
+  mlAlertDetailHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 20,
+    paddingBottom: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+  },
+  mlAlertDetailTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#333",
+    flex: 1,
+    marginLeft: 12,
+  },
+  mlAlertCloseBtn: {
+    fontSize: 24,
+    fontWeight: "bold",
+    color: "#999",
+    padding: 8,
+  },
+  mlAlertDetailSection: {
+    marginBottom: 18,
+    paddingBottom: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
+  },
+  mlAlertDetailLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#666",
+    marginBottom: 6,
+  },
+  mlAlertDetailValue: {
+    fontSize: 15,
+    color: "#333",
+    fontWeight: "500",
+    lineHeight: 20,
+  },
+  mlAlertDetailSubtext: {
+    fontSize: 13,
+    color: "#999",
+    marginBottom: 10,
+  },
+  mlAlertDetailButtons: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 20,
+  },
+  deleteButton: {
+    backgroundColor: "#FF5252",
+  },
+  // Recording Button Style
+  recordBtn: {
+    backgroundColor: "#FFEBEE",
+    borderColor: "#FF5722",
+  },
+  // Test Notification Button Style
+  testBtn: {
+    backgroundColor: "#E3F2FD",
+    borderColor: "#2196F3",
+  },
+  // Recording Modal Styles
+  recordingOptions: {
+    marginVertical: 20,
+  },
+  optionLabel: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 12,
+  },
+  durationButton: {
+    backgroundColor: "#f0f0f0",
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginBottom: 10,
+    borderWidth: 2,
+    borderColor: "#e0e0e0",
+  },
+  durationButtonActive: {
+    backgroundColor: "#E3F2FD",
+    borderColor: "#2196F3",
+  },
+  durationButtonText: {
+    fontSize: 15,
+    color: "#666",
+    textAlign: "center",
+    fontWeight: "500",
+  },
+  durationButtonTextActive: {
+    color: "#2196F3",
+    fontWeight: "bold",
+  },
+  recordingInfo: {
+    fontSize: 13,
+    color: "#666",
+    marginTop: 12,
+    lineHeight: 18,
+    textAlign: "center",
+  },
+  startButton: {
+    backgroundColor: "#4CAF50",
+  },
+  startButtonText: {
+    color: "#fff",
+  },
+  cancelButton: {
+    backgroundColor: "#f0f0f0",
+  },
 
+  // Saved Files Styles
+  savedFileCard: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  savedFileIcon: {
+    marginRight: 12,
+  },
+  savedFileInfo: {
+    flex: 1,
+  },
+  savedFileName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 4,
+  },
+  savedFileDetails: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 2,
+  },
+  savedFileActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  shareBtn: {
+    backgroundColor: '#2196F3',
+  },
+});

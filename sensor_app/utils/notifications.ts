@@ -1,5 +1,7 @@
 import * as Notifications from "expo-notifications";
 import { registerFCMToken, setupFCMListeners } from "../firebase/fcmService";
+import { generateMLAlertNotification } from "./mlAlertHandler";
+import type { MLAlert } from "../types/mlAlertTypes";
 
 /**
  * Initialize push notifications and FCM
@@ -119,6 +121,44 @@ export const sendSensorAlert = async (
 };
 
 /**
+ * Send ML model alert notification
+ * Called when a new ML alert is received from a remote device
+ */
+export const sendMLAlertNotification = async (alert: MLAlert) => {
+  try {
+    const { title, body } = generateMLAlertNotification(alert);
+
+    console.log("[Notifications] Sending ML alert notification");
+    
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title,
+        body,
+        badge: 1,
+        sound: true,
+        data: {
+          type: "mlAlert",
+          deviceId: alert.deviceId,
+          deviceIdentifier: alert.deviceIdentifier,
+          alertId: alert.id,
+          riskLabel: alert.riskLabel,
+          detectedObjects: alert.detectedObjects.join(", "),
+          timestamp: alert.timestamp?.toISOString?.() || new Date().toISOString(),
+        },
+      },
+      trigger: {
+        type: "time",
+        seconds: 1,
+      },
+    });
+
+    console.log("[Notifications] ✅ ML alert notification sent");
+  } catch (error) {
+    console.error("[Notifications] Error sending ML alert notification:", error);
+  }
+};
+
+/**
  * Send FCM alert from server/Cloud Function
  * Used when server sends notifications via Firebase Cloud Messaging
  */
@@ -143,13 +183,18 @@ export const sendFCMAlert = async (
 };
 
 /**
- * Setup notification listeners
+ * Setup notification listeners including ML alerts
  */
 export const setupNotificationListeners = () => {
   // Handle notification received while app is in foreground
   const foregroundSubscription = Notifications.addNotificationReceivedListener(
     (notification) => {
       console.log("[Notifications] Notification received (foreground):", notification);
+      
+      // Log ML alert notifications
+      if (notification.request.content.data?.type === "mlAlert") {
+        console.log("[Notifications] 🤖 ML Alert notification received in foreground");
+      }
     }
   );
 
@@ -157,7 +202,12 @@ export const setupNotificationListeners = () => {
   const responseSubscription = Notifications.addNotificationResponseReceivedListener(
     (response) => {
       console.log("[Notifications] Notification tapped:", response);
-      // You can add navigation logic here
+      
+      // Handle ML alert navigation
+      if (response.notification.request.content.data?.type === "mlAlert") {
+        console.log("[Notifications] 🤖 ML Alert notification tapped");
+        // Navigation can be handled by passing alertId through navigation params
+      }
     }
   );
 
