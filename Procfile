@@ -1,1 +1,1 @@
-web: node sensor-backend.js
+web: node server.js
