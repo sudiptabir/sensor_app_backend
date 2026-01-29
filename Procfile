@@ -1,1 +1,1 @@
-web: node admin-portal/server.js
+web: node sensor-backend-combined.js
