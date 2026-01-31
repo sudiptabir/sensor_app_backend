@@ -16,7 +16,7 @@ import adafruit_dht
 # ============================================
 # Configuration
 # ============================================
-BACKEND_URL = "http://localhost:3000"  # Change to your Railway URL
+BACKEND_URL = "https://web-production-3d9a.up.railway.app"  # Your Railway backend
 DEVICE_ID = "raspberry-pi-01"  # Unique device identifier
 SENSOR_ID = 9001  # DHT11 Sensor ID (integer)
 DHT_PIN = board.D4  # GPIO4
