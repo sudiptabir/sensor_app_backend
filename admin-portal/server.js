@@ -337,16 +337,30 @@ app.get('/users', requireAuth, async (req, res) => {
     
     for (const doc of usersSnapshot.docs) {
       const userData = doc.data();
-      const blockStatus = await pool.query(
+      let userEmail = userData.email || null;
+      
+      // If email not in Firestore, fetch from Firebase Authentication
+      if (!userEmail) {
+        try {
+          const userRecord = await admin.auth().getUser(doc.id);
+          userEmail = userRecord.email;
+        } catch (authError) {
+          console.warn(`[Users] Could not fetch auth email for user ${doc.id}:`, authError.code);
+        }
+      }
+      
+      const blockStatus = pool ? await pool.query(
         'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
         [doc.id]
-      );
+      ) : { rows: [] };
       
       users.push({
         id: doc.id,
         ...userData,
+        email: userEmail,
         isBlocked: blockStatus.rows.length > 0,
-        blockReason: blockStatus.rows[0]?.reason
+        blockReason: blockStatus.rows[0]?.reason,
+        createdAt: userData.createdAt || userData.created_at
       });
     }
     
