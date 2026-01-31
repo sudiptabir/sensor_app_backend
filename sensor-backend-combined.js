@@ -682,7 +682,7 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
 
 /**
  * GET /api/sensors/:sensorId/latest
- * Get latest temperature and humidity reading
+ * Get latest temperature and humidity reading with sensor status
  */
 app.get('/api/sensors/:sensorId/latest', async (req, res) => {
   try {
@@ -690,7 +690,8 @@ app.get('/api/sensors/:sensorId/latest', async (req, res) => {
     
     const result = await pool.query(`
       SELECT 
-        sensor_id,
+        s.sensor_id,
+        s.is_active,
         (SELECT value FROM sensor_readings 
          WHERE sensor_id = $1 AND data_type = 'temperature' 
          ORDER BY created_at DESC LIMIT 1) as temperature,
@@ -699,12 +700,16 @@ app.get('/api/sensors/:sensorId/latest', async (req, res) => {
          ORDER BY created_at DESC LIMIT 1) as humidity,
         (SELECT MAX(created_at) FROM sensor_readings 
          WHERE sensor_id = $1) as timestamp
-      FROM sensor_readings
-      WHERE sensor_id = $1
+      FROM sensors s
+      WHERE s.sensor_id = $1
       LIMIT 1
     `, [sensorId]);
     
-    if (result.rows.length === 0 || (result.rows[0].temperature === null && result.rows[0].humidity === null)) {
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    if (result.rows[0].temperature === null && result.rows[0].humidity === null) {
       return res.status(404).json({ error: 'No readings found for this sensor' });
     }
     

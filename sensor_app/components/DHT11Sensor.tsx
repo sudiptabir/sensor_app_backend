@@ -54,21 +54,20 @@ export const DHT11Sensor = forwardRef<DHT11SensorHandle, DHT11SensorProps>(({
   const fetchSensorData = useCallback(async () => {
     try {
       setError(null);
-      const url = `${API_URL}/api/sensors/${sensorId}/latest`;
       
-      const response = await fetch(url);
+      // Fetch latest reading (now includes is_active status)
+      const latestUrl = `${API_URL}/api/sensors/${sensorId}/latest`;
+      const latestResponse = await fetch(latestUrl);
       
-      if (!response.ok) {
-        const contentType = response.headers.get('content-type');
-        let errorMessage = `Failed to fetch sensor data: ${response.status}`;
+      if (!latestResponse.ok) {
+        const contentType = latestResponse.headers.get('content-type');
+        let errorMessage = `Failed to fetch sensor data: ${latestResponse.status}`;
         
-        // Only try to parse as JSON if content-type is application/json
         if (contentType?.includes('application/json')) {
           try {
-            const data = await response.json();
+            const data = await latestResponse.json();
             errorMessage = data.error || errorMessage;
           } catch (e) {
-            // Ignore JSON parse error, use default message
             console.error('[DHT11] Failed to parse error response:', e);
           }
         }
@@ -76,9 +75,13 @@ export const DHT11Sensor = forwardRef<DHT11SensorHandle, DHT11SensorProps>(({
         throw new Error(errorMessage);
       }
       
-      const data = await response.json();
-      setReading(data);
-      setSensorEnabled(true);
+      const latestData = await latestResponse.json();
+      setReading(latestData);
+      
+      // Update sensor status from the response
+      if (latestData.is_active !== undefined) {
+        setSensorEnabled(latestData.is_active);
+      }
     } catch (err) {
       console.error('[DHT11] Sensor fetch error:', err);
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch sensor data';
@@ -138,10 +141,14 @@ export const DHT11Sensor = forwardRef<DHT11SensorHandle, DHT11SensorProps>(({
       }
 
       const data = await response.json();
-      setSensorEnabled(action === 'on');
       
-      // Refresh data after control action
-      await fetchSensorData();
+      // Update status immediately from API response
+      setSensorEnabled(data.is_active);
+      
+      // Refresh data after control action to get latest status
+      setTimeout(() => {
+        fetchSensorData();
+      }, 500);
       
       Alert.alert(
         'Success',
