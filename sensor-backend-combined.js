@@ -397,6 +397,33 @@ app.get('/api/readings/:sensorId', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/readings/stats/:sensorId
+ * Returns statistics (min, max, avg) for sensor readings
+ */
+app.get('/api/readings/stats/:sensorId', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const { hours = 24 } = req.query;
+    
+    const result = await pool.query(
+      `SELECT 
+        COUNT(*) as count,
+        MIN(CAST(value AS FLOAT)) as min_value,
+        MAX(CAST(value AS FLOAT)) as max_value,
+        AVG(CAST(value AS FLOAT)) as avg_value,
+        MIN(created_at) as first_reading,
+        MAX(created_at) as last_reading
+       FROM sensor_readings
+       WHERE sensor_id = $1 AND created_at > NOW() - INTERVAL '${hours} hours'`,
+      [sensorId]
+    );
+    res.json(result.rows[0] || { count: 0, min_value: null, max_value: null, avg_value: null });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/readings', async (req, res) => {
   try {
     const { 
