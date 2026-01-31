@@ -606,15 +606,20 @@ app.get('/api/sensors/:sensorId/latest', async (req, res) => {
     const result = await pool.query(`
       SELECT 
         sensor_id,
-        MAX(CASE WHEN data_type = 'temperature' THEN value END) as temperature,
-        MAX(CASE WHEN data_type = 'humidity' THEN value END) as humidity,
-        MAX(time) as timestamp
+        (SELECT value FROM sensor_readings 
+         WHERE sensor_id = $1 AND data_type = 'temperature' 
+         ORDER BY created_at DESC LIMIT 1) as temperature,
+        (SELECT value FROM sensor_readings 
+         WHERE sensor_id = $1 AND data_type = 'humidity' 
+         ORDER BY created_at DESC LIMIT 1) as humidity,
+        (SELECT MAX(created_at) FROM sensor_readings 
+         WHERE sensor_id = $1) as timestamp
       FROM sensor_readings
       WHERE sensor_id = $1
-      GROUP BY sensor_id
+      LIMIT 1
     `, [sensorId]);
     
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0 || (result.rows[0].temperature === null && result.rows[0].humidity === null)) {
       return res.status(404).json({ error: 'No readings found for this sensor' });
     }
     
