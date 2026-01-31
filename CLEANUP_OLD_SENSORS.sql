@@ -30,11 +30,11 @@ OR sensor_name LIKE '%CPU%';
 -- ============================================
 
 -- Make sure you have the device registered first
--- This assumes you have a device with ID 'raspberry-pi-01'
+-- This assumes you have a device with ID '3d49c55d-bbfd-4bd0-9663-8728d64743ac'
 -- If not, register it first:
 
 INSERT INTO device_metadata (device_id, device_name, device_type, location, is_online)
-VALUES ('raspberry-pi-01', 'Raspberry Pi - Main', 'raspberry_pi', 'Living Room', true)
+VALUES ('3d49c55d-bbfd-4bd0-9663-8728d64743ac', 'Raspberry Pi - Main', 'raspberry_pi', 'Living Room', true)
 ON CONFLICT (device_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP;
 
 -- Now create the DHT11 sensor
@@ -48,7 +48,7 @@ INSERT INTO sensors (
   is_active,
   created_at
 ) VALUES (
-  'raspberry-pi-01',
+  '3d49c55d-bbfd-4bd0-9663-8728d64743ac',
   9001,
   'DHT11 Sensor',
   'temperature_humidity',
@@ -79,7 +79,7 @@ ADD COLUMN IF NOT EXISTS data_type VARCHAR(50) DEFAULT 'temperature';
 SELECT * FROM sensors ORDER BY created_at DESC;
 
 -- View sensors by device
-SELECT * FROM sensors WHERE device_id = 'raspberry-pi-01';
+SELECT * FROM sensors WHERE device_id = '3d49c55d-bbfd-4bd0-9663-8728d64743ac';
 
 -- Count sensors by type
 SELECT sensor_type, COUNT(*) FROM sensors GROUP BY sensor_type;

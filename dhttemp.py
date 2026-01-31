@@ -17,7 +17,7 @@ import adafruit_dht
 # Configuration
 # ============================================
 BACKEND_URL = "https://web-production-3d9a.up.railway.app"  # Your Railway backend
-DEVICE_ID = "raspberry-pi-01"  # Unique device identifier
+DEVICE_ID = "3d49c55d-bbfd-4bd0-9663-8728d64743ac"  # Raspberry Pi device ID from admin portal
 SENSOR_ID = 9001  # DHT11 Sensor ID (integer)
 DHT_PIN = board.D4  # GPIO4
 UPDATE_INTERVAL = 2  # seconds
