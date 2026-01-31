@@ -1,11 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   ActivityIndicator,
-  RefreshControl,
-  ScrollView,
   StyleSheet,
   Alert,
 } from 'react-native';
@@ -26,38 +24,90 @@ interface DHT11SensorProps {
   deviceId?: string;
 }
 
-export const DHT11Sensor: React.FC<DHT11SensorProps> = ({
+export interface DHT11SensorHandle {
+  refresh: () => Promise<void>;
+}
+
+export const DHT11Sensor = forwardRef<DHT11SensorHandle, DHT11SensorProps>(({
   sensorId,
   sensorName = 'DHT11 Sensor',
   deviceId,
-}) => {
+}, ref) => {
   const [reading, setReading] = useState<SensorReading | null>(null);
   const [loading, setLoading] = useState(true);
   const [sensorEnabled, setSensorEnabled] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch latest sensor reading
-  const fetchSensorData = async () => {
+  // Validate sensorId
+  if (!sensorId) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>Invalid sensor ID</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Fetch latest sensor reading (memoized so it can be reused)
+  const fetchSensorData = useCallback(async () => {
     try {
       setError(null);
-      const response = await fetch(`${API_URL}/api/sensors/${sensorId}/latest`);
+      const url = `${API_URL}/api/sensors/${sensorId}/latest`;
+      
+      const response = await fetch(url);
       
       if (!response.ok) {
-        throw new Error(`Failed to fetch sensor data: ${response.status}`);
+        const contentType = response.headers.get('content-type');
+        let errorMessage = `Failed to fetch sensor data: ${response.status}`;
+        
+        // Only try to parse as JSON if content-type is application/json
+        if (contentType?.includes('application/json')) {
+          try {
+            const data = await response.json();
+            errorMessage = data.error || errorMessage;
+          } catch (e) {
+            // Ignore JSON parse error, use default message
+            console.error('[DHT11] Failed to parse error response:', e);
+          }
+        }
+        
+        throw new Error(errorMessage);
       }
       
       const data = await response.json();
       setReading(data);
       setSensorEnabled(true);
     } catch (err) {
-      console.error('Sensor fetch error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to fetch sensor data');
+      console.error('[DHT11] Sensor fetch error:', err);
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch sensor data';
+      setError(errorMsg);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [sensorId]);
+
+  // Expose refresh method to parent - defined AFTER fetchSensorData
+  useImperativeHandle(ref, () => ({
+    refresh: async () => {
+      await fetchSensorData();
+    }
+  }), [fetchSensorData]);
+
+  // Initial fetch and auto-refresh setup
+  useEffect(() => {
+    // Fetch immediately on mount or when sensorId changes
+    fetchSensorData();
+    
+    // Refresh every 60 seconds (to avoid rate limiting)
+    const interval = setInterval(() => {
+      fetchSensorData();
+    }, 60000);
+    
+    return () => clearInterval(interval);
+  }, [sensorId, fetchSensorData]);
 
   // Control sensor on/off
   const controlSensor = async (action: 'on' | 'off') => {
@@ -72,16 +122,30 @@ export const DHT11Sensor: React.FC<DHT11SensorProps> = ({
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to control sensor: ${response.status}`);
+        const contentType = response.headers.get('content-type');
+        let errorMessage = `Failed to control sensor: ${response.status}`;
+        
+        if (contentType?.includes('application/json')) {
+          try {
+            const data = await response.json();
+            errorMessage = data.error || errorMessage;
+          } catch (e) {
+            // Ignore JSON parse error
+          }
+        }
+        
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
       setSensorEnabled(action === 'on');
       
+      // Refresh data after control action
+      await fetchSensorData();
+      
       Alert.alert(
         'Success',
-        `Sensor turned ${action.toUpperCase()}`,
-        [{ text: 'OK', onPress: fetchSensorData }]
+        `Sensor turned ${action.toUpperCase()}`
       );
     } catch (err) {
       console.error('Control error:', err);
@@ -89,22 +153,6 @@ export const DHT11Sensor: React.FC<DHT11SensorProps> = ({
       Alert.alert('Error', 'Failed to control sensor');
     }
   };
-
-  // Refresh data
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchSensorData();
-  };
-
-  // Initial fetch
-  useEffect(() => {
-    fetchSensorData();
-    
-    // Refresh every 5 seconds
-    const interval = setInterval(fetchSensorData, 5000);
-    
-    return () => clearInterval(interval);
-  }, [sensorId]);
 
   if (loading && !refreshing) {
     return (
@@ -115,10 +163,7 @@ export const DHT11Sensor: React.FC<DHT11SensorProps> = ({
   }
 
   return (
-    <ScrollView
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-      style={styles.container}
-    >
+    <View style={styles.container}>
       {error && (
         <View style={styles.errorContainer}>
           <Ionicons name="alert-circle" size={20} color="#ef4444" />
@@ -195,11 +240,6 @@ export const DHT11Sensor: React.FC<DHT11SensorProps> = ({
             {sensorEnabled ? 'TURN OFF' : 'TURN ON'}
           </Text>
         </TouchableOpacity>
-
-        <TouchableOpacity style={styles.refreshButton} onPress={onRefresh}>
-          <Ionicons name="refresh" size={24} color="#3b82f6" />
-          <Text style={styles.refreshButtonText}>Refresh</Text>
-        </TouchableOpacity>
       </View>
 
       {/* Info Section */}
@@ -228,9 +268,11 @@ export const DHT11Sensor: React.FC<DHT11SensorProps> = ({
           </View>
         )}
       </View>
-    </ScrollView>
+    </View>
   );
-};
+});
+
+DHT11Sensor.displayName = 'DHT11Sensor';
 
 const styles = StyleSheet.create({
   container: {

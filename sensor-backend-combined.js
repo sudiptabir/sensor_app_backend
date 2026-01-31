@@ -336,6 +336,51 @@ app.post('/api/devices', async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/devices/:deviceId/metadata
+ * Update device metadata (including IP address)
+ */
+app.put('/api/devices/:deviceId/metadata', async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const metadata = req.body;
+    
+    // Get existing metadata
+    const existing = await pool.query(
+      'SELECT device_metadata FROM device_metadata WHERE device_id = $1',
+      [deviceId]
+    );
+    
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    
+    // Merge with existing metadata
+    const currentMetadata = existing.rows[0].device_metadata || {};
+    const updatedMetadata = { ...currentMetadata, ...metadata };
+    
+    // Update metadata
+    const result = await pool.query(
+      `UPDATE device_metadata 
+       SET device_metadata = $1, updated_at = NOW() 
+       WHERE device_id = $2 
+       RETURNING *`,
+      [JSON.stringify(updatedMetadata), deviceId]
+    );
+    
+    console.log(`📝 Updated metadata for device ${deviceId}:`, metadata);
+    
+    res.json({
+      message: 'Metadata updated',
+      device_id: deviceId,
+      metadata: updatedMetadata
+    });
+  } catch (error) {
+    console.error('[Metadata Update] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // SENSOR BACKEND - Sensor Management
 // ============================================
@@ -567,6 +612,7 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
     
     const isActive = action === 'on';
     
+    // Update database
     const result = await pool.query(
       `UPDATE sensors SET is_active = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
       [isActive, sensorId]
@@ -578,6 +624,43 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
     
     console.log(`📡 Sensor ${sensorId} turned ${action.toUpperCase()}`);
     
+    // Get device IP from device_metadata
+    const sensor = result.rows[0];
+    const deviceResult = await pool.query(
+      `SELECT device_metadata FROM device_metadata WHERE device_id = $1`,
+      [sensor.device_id]
+    );
+    
+    let controlSuccess = false;
+    let controlError = null;
+    
+    if (deviceResult.rows.length > 0) {
+      const metadata = deviceResult.rows[0].device_metadata;
+      const deviceIp = metadata?.ip_address;
+      
+      if (deviceIp) {
+        // Send control command to Raspberry Pi
+        try {
+          const controlUrl = `http://${deviceIp}:5000/sensor/control?action=${action}`;
+          console.log(`🔌 Sending control to Pi at ${controlUrl}`);
+          
+          const axios = require('axios');
+          const piResponse = await axios.get(controlUrl, { timeout: 5000 });
+          
+          if (piResponse.status === 200) {
+            controlSuccess = true;
+            console.log(`✅ Pi responded: ${JSON.stringify(piResponse.data)}`);
+          }
+        } catch (piError) {
+          console.error(`⚠️  Failed to control Pi: ${piError.message}`);
+          controlError = piError.message;
+        }
+      } else {
+        console.log(`⚠️  No IP address found for device ${sensor.device_id}`);
+        controlError = 'Device IP address not registered';
+      }
+    }
+    
     // Broadcast control event via WebSocket
     io.to(`sensor_${sensorId}`).emit('sensor_control', {
       sensor_id: sensorId,
@@ -588,7 +671,9 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
     res.json({
       message: `Sensor turned ${action.toUpperCase()}`,
       sensor_id: sensorId,
-      is_active: isActive
+      is_active: isActive,
+      device_control: controlSuccess ? 'success' : 'failed',
+      device_error: controlError
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

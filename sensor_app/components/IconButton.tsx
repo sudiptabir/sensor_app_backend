@@ -1,41 +1,43 @@
 import { TouchableOpacity, StyleSheet, View } from 'react-native';
-import { SvgUri } from 'react-native-svg';
 import { MaterialIcons } from '@expo/vector-icons';
 
 interface IconButtonProps {
   onPress: () => void;
-  icon?: string; // name of icon in assets/icons (without .svg)
+  icon?: string; // MaterialIcons icon name or custom mapped names
   size?: number;
   color?: string;
   style?: any;
-  materialIcon?: string; // fallback to MaterialIcons if icon not found
-  materialIconSize?: number;
-  materialIconColor?: string;
   testID?: string;
 }
 
+// Map custom icon names to MaterialIcons names
+const iconMap: { [key: string]: string } = {
+  add: 'add',
+  alert: 'notifications-active',
+  devices: 'devices',
+  profile: 'account-circle',
+  home: 'home',
+  sensors: 'sensors',
+  settings: 'settings',
+  'arrow-back': 'arrow-back',
+  info: 'info',
+  logout: 'logout',
+  edit: 'edit',
+  delete: 'delete',
+  close: 'close',
+  check: 'check',
+};
+
 export default function IconButton({
   onPress,
-  icon,
+  icon = 'home',
   size = 24,
   color = '#FFFFFF',
   style,
-  materialIcon,
-  materialIconSize,
-  materialIconColor,
   testID,
 }: IconButtonProps) {
-  // Map icon names to SVG URI
-  const getIconUri = (iconName: string) => {
-    // Using require to import SVG assets
-    const iconMap: { [key: string]: any } = {
-      add: require('../assets/icons/add.svg'),
-      alert: require('../assets/icons/alert.svg'),
-      devices: require('../assets/icons/devices.svg'),
-      profile: require('../assets/icons/profile.svg'),
-    };
-    return iconMap[iconName];
-  };
+  // Get the MaterialIcons name from the map, or use the icon prop directly
+  const iconName = iconMap[icon] || icon;
 
   return (
     <TouchableOpacity
@@ -44,22 +46,11 @@ export default function IconButton({
       testID={testID}
       activeOpacity={0.7}
     >
-      {icon ? (
-        <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
-          <SvgUri
-            width={size}
-            height={size}
-            uri={`data:image/svg+xml;utf8,${require(`../assets/icons/${icon}.svg`)}`}
-            color={color}
-          />
-        </View>
-      ) : materialIcon ? (
-        <MaterialIcons
-          name={materialIcon}
-          size={materialIconSize || size}
-          color={materialIconColor || color}
-        />
-      ) : null}
+      <MaterialIcons
+        name={iconName as any}
+        size={size}
+        color={color}
+      />
     </TouchableOpacity>
   );
 }

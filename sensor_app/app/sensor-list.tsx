@@ -45,21 +45,22 @@ export default function SensorListScreen() {
           </View>
         ) : (
           <FlatList
-            data={sensors}
-            scrollEnabled={true}
-            keyExtractor={(item) => item.sensor_id.toString()}
-            renderItem={({ item }) => (
-              <SensorCard
-                sensorId={item.sensor_id}
-                sensorName={item.sensor_name}
-                sensorType={item.sensor_type}
-                unit={item.unit}
-                deviceName={item.device_id}
-                deviceId={deviceId}
-              />
-            )}
-            contentContainerStyle={styles.listContent}
-          />
+              data={sensors}
+              scrollEnabled={true}
+              keyExtractor={(item) => item.sensor_id.toString()}
+              renderItem={({ item }) => (
+                <SensorCard
+                  sensorId={item.sensor_id}
+                  sensorName={item.sensor_name}
+                  sensorType={item.sensor_type}
+                  unit={item.unit}
+                  deviceName={item.device_id}
+                  deviceId={deviceId}
+                />
+              )}
+              contentContainerStyle={styles.listContent}
+            />
+
         )}
       </View>
     </View>

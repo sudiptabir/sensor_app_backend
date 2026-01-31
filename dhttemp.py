@@ -18,9 +18,48 @@ import adafruit_dht
 # ============================================
 BACKEND_URL = "https://web-production-3d9a.up.railway.app"  # Your Railway backend
 DEVICE_ID = "3d49c55d-bbfd-4bd0-9663-8728d64743ac"  # Raspberry Pi device ID from admin portal
-SENSOR_ID = 9001  # DHT11 Sensor ID (integer)
+SENSOR_ID = 6  # DHT11 Sensor ID (integer)
 DHT_PIN = board.D4  # GPIO4
 UPDATE_INTERVAL = 2  # seconds
+
+def get_local_ip():
+    """Get the local IP address of this Raspberry Pi"""
+    import socket
+    try:
+        # Create a socket to determine local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+def register_device_ip():
+    """Register this device's IP address with the backend"""
+    try:
+        ip_address = get_local_ip()
+        if not ip_address:
+            print("⚠️  Could not determine local IP address")
+            return
+        
+        print(f"📍 Local IP: {ip_address}")
+        
+        # Update device metadata with IP address
+        url = f"{BACKEND_URL}/api/devices/{DEVICE_ID}/metadata"
+        response = requests.put(
+            url,
+            json={"ip_address": ip_address},
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code in [200, 201]:
+            print(f"✅ Device IP registered: {ip_address}")
+        else:
+            print(f"⚠️  Failed to register IP: {response.status_code}")
+    except Exception as e:
+        print(f"⚠️  Error registering IP: {e}")
 
 # ============================================
 # Global State
@@ -203,6 +242,11 @@ def start_http_server(port=5000):
 # ============================================
 if __name__ == "__main__":
     try:
+        print("🚀 Initializing DHT11 Sensor...")
+        
+        # Register device IP with backend
+        register_device_ip()
+        
         # Start HTTP server in background thread
         server_thread = threading.Thread(target=start_http_server, args=(5000,), daemon=True)
         server_thread.start()

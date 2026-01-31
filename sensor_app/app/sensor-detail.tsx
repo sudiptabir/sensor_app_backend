@@ -1,12 +1,16 @@
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, RefreshControl } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MaterialIcons } from "@expo/vector-icons";
-import DHT11Sensor from "../components/DHT11Sensor";
+import { useState, useCallback, useRef } from "react";
+import DHT11Sensor, { DHT11SensorHandle } from "../components/DHT11Sensor";
 
 export default function SensorDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const [refreshing, setRefreshing] = useState(false);
+  const sensorRef = useRef<DHT11SensorHandle>(null);
+  
   const { 
     sensorId, 
     sensorName, 
@@ -24,6 +28,19 @@ export default function SensorDetailScreen() {
   // Check if this is a temperature/humidity sensor (DHT11)
   const isDHT11 = sensorType === 'temperature_humidity' || sensorType === 'dht11' || sensorName?.toLowerCase().includes('dht11');
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      if (sensorRef.current && isDHT11) {
+        await sensorRef.current.refresh();
+      }
+    } catch (err) {
+      console.error('[SensorDetail] Error during refresh:', err);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [isDHT11]);
+
   return (
     <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       {/* Header */}
@@ -39,10 +56,14 @@ export default function SensorDetailScreen() {
       </View>
 
       {/* Content */}
-      <ScrollView style={styles.content}>
+      <ScrollView 
+        style={styles.content}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      >
         {isDHT11 ? (
           // Show DHT11 sensor component
           <DHT11Sensor
+            ref={sensorRef}
             sensorId={sensorId || ''}
             sensorName={sensorName}
             deviceId={deviceId}

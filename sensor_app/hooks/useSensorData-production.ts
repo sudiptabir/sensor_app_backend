@@ -57,7 +57,27 @@ async function apiRequest(
     const response = await fetch(url, options);
     
     if (!response.ok) {
-      const error = await response.json();
+      const contentType = response.headers.get('content-type');
+      let error: any = {};
+      
+      // Only try to parse as JSON if content-type is application/json
+      if (contentType?.includes('application/json')) {
+        try {
+          error = await response.json();
+        } catch (e) {
+          // Ignore JSON parse error, use status code message
+          console.error(`[API] Failed to parse error response as JSON:`, e);
+          error = { error: `HTTP ${response.status}` };
+        }
+      } else {
+        // For non-JSON responses, try to get text
+        try {
+          const text = await response.text();
+          error = { error: text || `HTTP ${response.status}` };
+        } catch (e) {
+          error = { error: `HTTP ${response.status}` };
+        }
+      }
       
       // Handle access denied specifically
       if (response.status === 403 && error.blocked) {
@@ -129,13 +149,19 @@ export interface Device {
  * Hook to fetch sensor readings with auto-refresh
  * Requires JWT authentication and user ID for access control
  */
-export function useSensorData(sensorId: number, hours: number = 24, token?: string, userId?: string) {
+export function useSensorData(sensorId: number, hours: number = 24, token?: string, userId?: string, enabled: boolean = true) {
   const [readings, setReadings] = useState<SensorReading[]>([]);
   const [stats, setStats] = useState<SensorStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Skip if disabled
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
+
     const fetchData = async () => {
       try {
         setLoading(true);
@@ -171,11 +197,11 @@ export function useSensorData(sensorId: number, hours: number = 24, token?: stri
 
     fetchData();
     
-    // Auto-refresh every 5 seconds
-    const interval = setInterval(fetchData, 5000);
+    // Auto-refresh every 60 seconds (reduced to avoid rate limiting)
+    const interval = setInterval(fetchData, 60000);
     
     return () => clearInterval(interval);
-  }, [sensorId, hours, token, userId]);
+  }, [sensorId, hours, token, userId, enabled]);
 
   return { readings, stats, loading, error };
 }
@@ -212,8 +238,8 @@ export function useSensors(deviceId?: string, token?: string) {
 
     fetchSensors();
     
-    // Refresh every 10 seconds
-    const interval = setInterval(fetchSensors, 10000);
+    // Auto-refresh every 60 seconds (reduced to avoid rate limiting)
+    const interval = setInterval(fetchSensors, 60000);
     
     return () => clearInterval(interval);
   }, [deviceId, token]);
@@ -249,8 +275,8 @@ export function useDevices(token?: string) {
 
     fetchDevices();
     
-    // Refresh every 10 seconds
-    const interval = setInterval(fetchDevices, 10000);
+    // Auto-refresh every 60 seconds (reduced to avoid rate limiting)
+    const interval = setInterval(fetchDevices, 60000);
     
     return () => clearInterval(interval);
   }, [token]);
