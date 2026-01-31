@@ -1,15 +1,17 @@
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { useSensorData } from '../hooks/useSensorData-production';
 import { auth } from '../firebase/firebaseConfig';
 
 interface Props {
-  sensorId: number;
+  sensorId: number | string;
   sensorName: string;
   sensorType: string;
   unit: string;
   deviceName?: string;
+  deviceId?: string;
 }
 
 export default function SensorCard({
@@ -18,9 +20,24 @@ export default function SensorCard({
   sensorType,
   unit,
   deviceName,
+  deviceId,
 }: Props) {
+  const router = useRouter();
   const userId = auth.currentUser?.uid || '';
-  const { readings, stats, loading, error } = useSensorData(sensorId, 24, undefined, userId);
+  const { readings, stats, loading, error } = useSensorData(sensorId as number, 24, undefined, userId);
+
+  const handlePress = () => {
+    router.push({
+      pathname: '/sensor-detail',
+      params: {
+        sensorId: String(sensorId),
+        sensorName,
+        sensorType,
+        unit,
+        deviceId: deviceId || deviceName,
+      },
+    });
+  };
 
   // Map old sensor names to new display names
   const getDisplayName = (name: string) => {
@@ -90,12 +107,13 @@ export default function SensorCard({
   }
 
   return (
-    <LinearGradient
-      colors={getGradientColors()}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 1, y: 1 }}
-      style={styles.card}
-    >
+    <TouchableOpacity onPress={handlePress} activeOpacity={0.8}>
+      <LinearGradient
+        colors={getGradientColors()}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.card}
+      >
       <View style={styles.header}>
         <View style={styles.titleContainer}>
           <MaterialIcons
@@ -149,9 +167,8 @@ export default function SensorCard({
         </View>
       )}
     </LinearGradient>
+    </TouchableOpacity>
   );
-}
-
 const styles = StyleSheet.create({
   card: {
     borderRadius: 12,

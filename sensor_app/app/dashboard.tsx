@@ -14,6 +14,7 @@ import { MaterialIcons } from "@expo/vector-icons";
 import * as Notifications from "expo-notifications";
 import type { MLAlert } from "../types/mlAlertTypes";
 import SensorCard from "../components/SensorCard";
+import IconButton from "../components/IconButton";
 import * as FileSystem from 'expo-file-system';
 import RNFS from 'react-native-fs';
 import { getFirestore, collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
@@ -697,12 +698,13 @@ export default function Dashboard() {
       >
       {/* Header with Profile and Title */}
       <View style={styles.headerContainer}>
-        <TouchableOpacity
-          style={styles.profileButton}
+        <IconButton
+          icon="profile"
+          size={28}
+          color="#FFFFFF"
           onPress={() => setShowProfileModal(true)}
-        >
-          <Text style={styles.profileButtonText}>👤</Text>
-        </TouchableOpacity>
+          style={styles.profileButton}
+        />
         <Text style={styles.appTitle}>Sensor App</Text>
         <View style={styles.headerSpacer} />
       </View>
@@ -714,7 +716,13 @@ export default function Dashboard() {
           onPress={() => setActiveTab("alerts")}
         >
           <View style={{ flexDirection: "row", alignItems: "center" }}>
-            <MaterialIcons name="warning" size={20} color="#ffffff" style={{ marginRight: 6 }} />
+            <IconButton
+              icon="alert"
+              size={20}
+              color="#ffffff"
+              onPress={() => {}}
+              style={{ margin: 0, padding: 0, marginRight: 6 }}
+            />
             <Text style={styles.navItemText}>Alerts</Text>
             {mlAlerts.length > 0 && (
               <View style={styles.badge}>
@@ -728,7 +736,13 @@ export default function Dashboard() {
           onPress={() => setActiveTab("devices")}
         >
           <View style={{ flexDirection: "row", alignItems: "center" }}>
-            <MaterialIcons name="computer" size={20} color="#ffffff" style={{ marginRight: 6 }} />
+            <IconButton
+              icon="devices"
+              size={20}
+              color="#ffffff"
+              onPress={() => {}}
+              style={{ margin: 0, padding: 0, marginRight: 6 }}
+            />
             <Text style={styles.navItemText}>Devices</Text>
           </View>
         </TouchableOpacity>
@@ -832,7 +846,14 @@ export default function Dashboard() {
               style={styles.addButton}
               onPress={handleAddDevice}
             >
-              <Text style={styles.addButtonText}>➕ Add</Text>
+              <IconButton
+                icon="add"
+                size={20}
+                color="#FFFFFF"
+                onPress={() => {}}
+                style={{ margin: 0, padding: 0 }}
+              />
+              <Text style={styles.addButtonText}> Add</Text>
             </TouchableOpacity>
           </View>
 

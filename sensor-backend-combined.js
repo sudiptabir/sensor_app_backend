@@ -399,10 +399,31 @@ app.get('/api/readings/:sensorId', async (req, res) => {
 
 app.post('/api/readings', async (req, res) => {
   try {
-    const { sensor_id, value, quality = 100 } = req.body;
+    const { 
+      device_id, 
+      sensor_id, 
+      temperature,
+      humidity,
+      value, 
+      quality = 100,
+      sensor_type = 'temperature'
+    } = req.body;
+    
+    // Support both old format (value) and new DHT format (temperature/humidity)
+    let insertTemp = value;
+    let insertHumidity = null;
+    
+    if (temperature !== undefined) {
+      insertTemp = temperature;
+      insertHumidity = humidity;
+    }
+    
+    if (!sensor_id) {
+      return res.status(400).json({ error: 'sensor_id is required' });
+    }
     
     const sensorCheck = await pool.query(
-      'SELECT sensor_id FROM sensors WHERE sensor_id = $1',
+      'SELECT sensor_id, device_id FROM sensors WHERE sensor_id = $1',
       [sensor_id]
     );
     
@@ -410,21 +431,167 @@ app.post('/api/readings', async (req, res) => {
       return res.status(404).json({ error: 'Sensor not found' });
     }
     
-    const result = await pool.query(
-      `INSERT INTO sensor_readings (time, sensor_id, value, quality)
-       VALUES (NOW(), $1, $2, $3)
+    // Insert temperature reading
+    const tempResult = await pool.query(
+      `INSERT INTO sensor_readings (time, sensor_id, value, quality, data_type)
+       VALUES (NOW(), $1, $2, $3, 'temperature')
        RETURNING *`,
-      [sensor_id, value, quality]
+      [sensor_id, insertTemp, quality]
     );
     
+    // Insert humidity reading if provided
+    let humidityResult = null;
+    if (insertHumidity !== null) {
+      humidityResult = await pool.query(
+        `INSERT INTO sensor_readings (time, sensor_id, value, quality, data_type)
+         VALUES (NOW(), $1, $2, $3, 'humidity')
+         RETURNING *`,
+        [sensor_id, insertHumidity, quality]
+      );
+    }
+    
+    // Emit to WebSocket subscribers
     io.emit('sensor_reading', {
       sensor_id,
-      value,
+      temperature: insertTemp,
+      humidity: insertHumidity,
       quality,
-      timestamp: result.rows[0].time,
+      timestamp: tempResult.rows[0].time,
     });
     
-    res.status(201).json(result.rows[0]);
+    io.to(`sensor_${sensor_id}`).emit('sensor_update', {
+      sensor_id,
+      temperature: insertTemp,
+      humidity: insertHumidity,
+      timestamp: tempResult.rows[0].time,
+    });
+    
+    res.status(201).json({
+      temperature: insertTemp,
+      humidity: insertHumidity,
+      timestamp: tempResult.rows[0].time,
+      quality
+    });
+  } catch (error) {
+    console.error('Error saving reading:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// SENSOR CONTROL ENDPOINTS
+// ============================================
+
+/**
+ * GET /api/sensors/:sensorId/control?action=on|off
+ * Control sensor on/off
+ */
+app.get('/api/sensors/:sensorId/control', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const { action } = req.query;
+    
+    if (!['on', 'off'].includes(action)) {
+      return res.status(400).json({ error: 'Action must be "on" or "off"' });
+    }
+    
+    const isActive = action === 'on';
+    
+    const result = await pool.query(
+      `UPDATE sensors SET is_active = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
+      [isActive, sensorId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    console.log(`📡 Sensor ${sensorId} turned ${action.toUpperCase()}`);
+    
+    // Broadcast control event via WebSocket
+    io.to(`sensor_${sensorId}`).emit('sensor_control', {
+      sensor_id: sensorId,
+      action: action,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.json({
+      message: `Sensor turned ${action.toUpperCase()}`,
+      sensor_id: sensorId,
+      is_active: isActive
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/sensors/:sensorId/control
+ * Control sensor via POST
+ */
+app.post('/api/sensors/:sensorId/control', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const { action } = req.body;
+    
+    if (!['on', 'off'].includes(action)) {
+      return res.status(400).json({ error: 'Action must be "on" or "off"' });
+    }
+    
+    const isActive = action === 'on';
+    
+    const result = await pool.query(
+      `UPDATE sensors SET is_active = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
+      [isActive, sensorId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    console.log(`📡 Sensor ${sensorId} turned ${action.toUpperCase()}`);
+    
+    // Broadcast control event via WebSocket
+    io.to(`sensor_${sensorId}`).emit('sensor_control', {
+      sensor_id: sensorId,
+      action: action,
+      timestamp: new Date().toISOString()
+    });
+    
+    res.json({
+      message: `Sensor turned ${action.toUpperCase()}`,
+      sensor_id: sensorId,
+      is_active: isActive
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/sensors/:sensorId/latest
+ * Get latest temperature and humidity reading
+ */
+app.get('/api/sensors/:sensorId/latest', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    
+    const result = await pool.query(`
+      SELECT 
+        sensor_id,
+        MAX(CASE WHEN data_type = 'temperature' THEN value END) as temperature,
+        MAX(CASE WHEN data_type = 'humidity' THEN value END) as humidity,
+        MAX(time) as timestamp
+      FROM sensor_readings
+      WHERE sensor_id = $1
+      GROUP BY sensor_id
+    `, [sensorId]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No readings found for this sensor' });
+    }
+    
+    res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

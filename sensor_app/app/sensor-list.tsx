@@ -55,6 +55,7 @@ export default function SensorListScreen() {
                 sensorType={item.sensor_type}
                 unit={item.unit}
                 deviceName={item.device_id}
+                deviceId={deviceId}
               />
             )}
             contentContainerStyle={styles.listContent}
