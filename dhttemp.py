@@ -18,7 +18,7 @@ import adafruit_dht
 # ============================================
 BACKEND_URL = "http://localhost:3000"  # Change to your Railway URL
 DEVICE_ID = "raspberry-pi-01"  # Unique device identifier
-SENSOR_ID = "dht11-sensor-01"
+SENSOR_ID = 9001  # DHT11 Sensor ID (integer)
 DHT_PIN = board.D4  # GPIO4
 UPDATE_INTERVAL = 2  # seconds
 

@@ -49,7 +49,7 @@ INSERT INTO sensors (
   created_at
 ) VALUES (
   'raspberry-pi-01',
-  'dht11-sensor-01',
+  9001,
   'DHT11 Sensor',
   'temperature_humidity',
   'Living Room',
@@ -83,6 +83,9 @@ SELECT * FROM sensors WHERE device_id = 'raspberry-pi-01';
 
 -- Count sensors by type
 SELECT sensor_type, COUNT(*) FROM sensors GROUP BY sensor_type;
+
+-- View the DHT11 sensor details
+SELECT sensor_id, sensor_name, sensor_type, is_active FROM sensors WHERE sensor_id = 9001;
 
 -- View recent readings
 SELECT sr.sensor_id, sr.value, sr.data_type, sr.time 
