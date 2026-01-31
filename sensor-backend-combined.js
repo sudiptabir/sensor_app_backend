@@ -389,11 +389,11 @@ app.put('/api/devices/:deviceId/metadata', async (req, res) => {
 app.get('/api/sensors', async (req, res) => {
   try {
     const { deviceId } = req.query;
-    let query = 'SELECT * FROM sensors WHERE is_active = true';
+    let query = 'SELECT * FROM sensors';
     let params = [];
     
     if (deviceId) {
-      query += ' AND device_id = $1';
+      query += ' WHERE device_id = $1';
       params.push(deviceId);
     }
     

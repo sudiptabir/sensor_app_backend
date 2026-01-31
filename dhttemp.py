@@ -199,6 +199,29 @@ def send_to_backend(temperature, humidity):
         print(f"⚠️  Error sending to backend: {e}")
 
 # ============================================
+# Check Sensor Status from Backend
+# ============================================
+def check_sensor_status():
+    """Check if sensor is enabled in backend database"""
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/api/sensors?deviceId={DEVICE_ID}",
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            sensors = response.json()
+            for sensor in sensors:
+                if sensor.get('sensor_id') == SENSOR_ID:
+                    return sensor.get('is_active', True)
+        
+        # If can't reach backend or sensor not found, default to enabled
+        return True
+    except:
+        # If backend unreachable, continue working
+        return True
+
+# ============================================
 # Main Sensor Loop
 # ============================================
 def sensor_loop():
@@ -207,6 +230,14 @@ def sensor_loop():
     
     while True:
         try:
+            # Check if sensor is enabled in backend
+            is_active = check_sensor_status()
+            
+            if not is_active:
+                print("⏸️  Sensor is disabled - skipping reading")
+                time.sleep(UPDATE_INTERVAL)
+                continue
+            
             temperature, humidity = read_sensor()
             
             if temperature is not None and humidity is not None:
