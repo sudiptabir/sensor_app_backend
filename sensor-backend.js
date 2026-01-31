@@ -421,8 +421,8 @@ app.get('/api/readings/stats/:sensorId', async (req, res) => {
         MIN(time) as oldest_reading,
         MAX(time) as latest_reading
        FROM sensor_readings
-       WHERE sensor_id = $1 AND time > NOW() - INTERVAL '${hours} hours'`,
-      [sensorId]
+       WHERE sensor_id = $1 AND time > NOW() - INTERVAL '1 hours' * $2`,
+      [sensorId, parseInt(hours) || 24]
     );
     
     res.json(result.rows[0]);
