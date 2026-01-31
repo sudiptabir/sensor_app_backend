@@ -17,6 +17,7 @@ const bcrypt = require('bcrypt');
 const cookieParser = require('cookie-parser');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const axios = require('axios');
 
 // ============================================
 // Configuration
@@ -644,7 +645,6 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
           const controlUrl = `http://${deviceIp}:5000/sensor/control?action=${action}`;
           console.log(`🔌 Sending control to Pi at ${controlUrl}`);
           
-          const axios = require('axios');
           const piResponse = await axios.get(controlUrl, { timeout: 5000 });
           
           if (piResponse.status === 200) {
