@@ -1,1 +1,1 @@
-web: node sensor-backend-combined.js
+web: node railway-server.js

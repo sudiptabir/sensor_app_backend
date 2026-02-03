@@ -9,14 +9,15 @@
     "scheme": "sensorapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "This app needs camera access for video streaming",
+        "NSMicrophoneUsageDescription": "This app needs microphone access for audio streaming"
+      }
     },
-
     "android": {
       "package": "com.gmail.sudiptabir.sensorapp",
-
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundColor": "#E6F4FE"
@@ -25,19 +26,23 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
+        "WRITE_EXTERNAL_STORAGE",
+        "CAMERA",
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "BLUETOOTH",
+        "BLUETOOTH_CONNECT"
       ]
     },
-
     "web": {
       "output": "static",
       "favicon": "./assets/images/favicon.png",
       "bundler": "metro"
     },
-
     "plugins": [
       "expo-router",
-
       [
         "expo-splash-screen",
         {
@@ -50,23 +55,20 @@
           }
         }
       ],
-
       "expo-web-browser",
-
       [
         "expo-notifications",
         {
           "icon": "./assets/images/icon.png",
           "color": "#ffffff"
         }
-      ]
+      ],
+      "expo-video"
     ],
-
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
     },
-
     "extra": {
       "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "968944435256-uu583289rveimgcvfg9m1k83ldrnbmmt.apps.googleusercontent.com",
       "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "968944435256-9k295e1jdfacv0tv3bs5luifsf8nmahl.apps.googleusercontent.com",

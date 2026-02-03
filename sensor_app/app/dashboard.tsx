@@ -1,9 +1,9 @@
-import { View, Text, Button, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Alert, TextInput, Modal, Linking, Share, Platform } from "react-native";
+import { View, Text, Button, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Alert, TextInput, Modal, Linking, Image } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { signOut, onAuthStateChanged } from "firebase/auth";
 import { auth } from "../firebase/firebaseConfig";
 import { useState, useEffect, useRef } from "react";
-import { listenToUserDevices, updateDeviceLabel, listenToDeviceReadings, getAvailableDevicesForUser, claimDevice, unclaimDevice, listenToUserAlerts, updateAlertRating, listenToUserMLAlerts, updateMLAlertRating } from "../db/firestore";
+import { listenToUserDevices, updateDeviceLabel, listenToDeviceReadings, getAvailableDevicesForUser, claimDevice, unclaimDevice, listenToUserAlerts, updateAlertRating, listenToUserMLAlerts, updateMLAlertRating, getUserMLAlerts, debugCheckAlertsCollections } from "../db/firestore";
 import { useRouter } from "expo-router";
 import { initPushNotifications, setupNotificationListeners } from "../utils/notifications";
 import { getCameraStreamUrl, getCameraWebUIUrl, getDeviceStreamingInfo } from "../utils/cameraStreaming";
@@ -15,9 +15,9 @@ import * as Notifications from "expo-notifications";
 import type { MLAlert } from "../types/mlAlertTypes";
 import SensorCard from "../components/SensorCard";
 import IconButton from "../components/IconButton";
-import * as FileSystem from 'expo-file-system';
-import RNFS from 'react-native-fs';
+import StyledAlert, { StyledAlertProps } from "../components/StyledAlert";
 import { getFirestore, collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
+import { SvgUri } from 'react-native-svg';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -49,20 +49,26 @@ export default function Dashboard() {
   const [selectedMLAlert, setSelectedMLAlert] = useState<MLAlert | null>(null);
   const [mlAlertRating, setMLAlertRating] = useState<number | null>(null);
   const [mlAlertAccuracy, setMLAlertAccuracy] = useState<boolean | null>(null);
-  const [sendingTestNotification, setSendingTestNotification] = useState<string | null>(null);
+  // Test notification state removed
+  
+  // Styled Alert States
+  const [styledAlertVisible, setStyledAlertVisible] = useState(false);
+  const [styledAlertConfig, setStyledAlertConfig] = useState<StyledAlertProps>({
+    visible: false,
+    title: '',
+    message: '',
+    type: 'info',
+  });
   
   // Track which alerts have already been notified
-  const shownNotificationsRef = useRef<Set<string>>(new Set());
+  const [showSensorControlModal, setShowSensorControlModal] = useState(false);
+  const [selectedDeviceForSensorControl, setSelectedDeviceForSensorControl] = useState<any | null>(null);
+  const [deviceSensors, setDeviceSensors] = useState<any[]>([]);
+  const [selectedSensor, setSelectedSensor] = useState<any | null>(null);
+  const [loadingSensors, setLoadingSensors] = useState(false);
 
-  // Data Recording States
-  const [showRecordingModal, setShowRecordingModal] = useState(false);
-  const [selectedDeviceForRecording, setSelectedDeviceForRecording] = useState<any | null>(null);
-  const [recordingDuration, setRecordingDuration] = useState<5 | 10>(5);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordedData, setRecordedData] = useState<any[]>([]);
-  const [recordingStartTime, setRecordingStartTime] = useState<Date | null>(null);
-  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const recordedDataRef = useRef<any[]>([]);
+  // Track which alerts have already been notified
+  const shownNotificationsRef = useRef<Set<string>>(new Set());
 
   // Polling interval ref for devices
   const devicesPollingRef = useRef<NodeJS.Timeout | null>(null);
@@ -87,19 +93,25 @@ export default function Dashboard() {
 
     const pollMLAlerts = async () => {
       try {
-        const userId = auth.currentUser?.uid;
-        if (!userId) return;
-
-        const firestore = getFirestore();
-        const alertsRef = collection(firestore, 'users', userId, 'mlAlerts');
-        const snapshot = await getDocs(alertsRef);
+        const currentUser = auth.currentUser;
+        console.log("[Dashboard] Starting ML alerts poll...");
+        console.log("[Dashboard] Current user ID:", currentUser?.uid);
         
-        const alerts = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        })) as MLAlert[];
+        // Debug: Check what's actually in Firestore
+        await debugCheckAlertsCollections();
+        
+        // Use the proper getUserMLAlerts function that fetches from devices collection
+        const alerts = await getUserMLAlerts(100);
 
         console.log("[Dashboard] ML Alerts polling: Found", alerts.length, "alerts");
+        // Debug: log first alert's fields
+        if (alerts.length > 0) {
+          console.log("[Dashboard] First alert fields:", Object.keys(alerts[0]));
+          console.log("[Dashboard] First alert ratingAccuracy:", alerts[0].ratingAccuracy);
+        } else {
+          console.warn("[Dashboard] No alerts found from getUserMLAlerts");
+          console.warn("[Dashboard] Expected alerts in: users/" + currentUser?.uid + "/mlAlerts");
+        }
         setMLAlerts(alerts);
         setLoading(false);
 
@@ -140,6 +152,9 @@ export default function Dashboard() {
         });
       } catch (error) {
         console.error("[Dashboard] Error polling ML alerts:", error);
+        // Still try to set loading to false so UI doesn't show spinner forever
+        setLoading(false);
+        setMLAlerts([]);
       }
     };
 
@@ -300,6 +315,24 @@ export default function Dashboard() {
     }
   };
 
+  // Helper function to show styled alerts
+  const showStyledAlert = (
+    title: string,
+    message: string,
+    type: 'success' | 'error' | 'info' | 'warning' | 'question' = 'info',
+    buttons?: Array<{ text: string; onPress?: () => void; style?: 'default' | 'cancel' | 'destructive' }>
+  ) => {
+    setStyledAlertConfig({
+      visible: true,
+      title,
+      message,
+      type,
+      buttons: buttons || [{ text: 'OK', style: 'default' }],
+      onClose: () => setStyledAlertVisible(false),
+    });
+    setStyledAlertVisible(true);
+  };
+
   const handleOpenRatingModal = (alert: any) => {
     setSelectedAlert(alert);
     setSelectedRating(alert.rating || null);
@@ -322,9 +355,9 @@ export default function Dashboard() {
       setSelectedRating(null);
       setSelectedAccuracy(null);
       const accuracyText = selectedAccuracy ? "accurate" : "inaccurate";
-      Alert.alert("✅ Feedback Saved", `Alert marked as ${accuracyText} and rated ${selectedRating}/10`);
+      showStyledAlert("Feedback Saved", `Alert marked as ${accuracyText} and rated ${selectedRating}/10`, "success");
     } catch (error: any) {
-      Alert.alert("Error", "Failed to save feedback");
+      showStyledAlert("Error", "Failed to save feedback", "error");
       console.error("[Dashboard] Rating error:", error);
     }
   };
@@ -356,12 +389,12 @@ export default function Dashboard() {
     try {
       setClaimingDeviceId(deviceId);
       await claimDevice(deviceId);
-      Alert.alert("Success", `Device "${label}" added to your account!`);
+      showStyledAlert("Success", `Device "${label}" added to your account!`, "success");
       setShowAddModal(false);
       setAvailableDevices([]);
     } catch (error) {
       console.error("[Dashboard] Error claiming device:", error);
-      Alert.alert("Error", "Failed to add device");
+      showStyledAlert("Error", "Failed to add device", "error");
     } finally {
       setClaimingDeviceId(null);
     }
@@ -392,24 +425,26 @@ export default function Dashboard() {
   };
 
   const handleUnclaimDevice = (deviceId: string, label: string) => {
-    Alert.alert(
+    showStyledAlert(
       "Remove Device",
       `Are you sure you want to remove "${label}" from your devices?\n\n(The device will not be deleted, just removed from your account)`,
+      "question",
       [
-        { text: "Cancel", onPress: () => {} },
+        { text: "Cancel", style: "cancel" },
         {
           text: "Remove",
+          style: "destructive",
           onPress: async () => {
+            setStyledAlertVisible(false);
             try {
               await unclaimDevice(deviceId);
               console.log("[Dashboard] Device unclaimed:", deviceId);
-              Alert.alert("Success", "Device removed from your account");
+              showStyledAlert("Success", "Device removed from your account", "success");
             } catch (error) {
               console.error("[Dashboard] Error unclaiming device:", error);
-              Alert.alert("Error", "Failed to remove device");
+              showStyledAlert("Error", "Failed to remove device", "error");
             }
           },
-          style: "destructive",
         },
       ]
     );
@@ -421,265 +456,84 @@ export default function Dashboard() {
     return readings[0];
   };
 
-  // Send test notification for a device
-  const handleSendTestNotification = async (device: any) => {
+  // Fetch sensors for a device
+  const fetchDeviceSensors = async (deviceId: string) => {
     try {
-      setSendingTestNotification(device.id);
+      setLoadingSensors(true);
+      const API_URL = process.env.EXPO_PUBLIC_API_URL;
+      const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
       const userId = auth.currentUser?.uid;
-      
-      if (!userId) {
-        Alert.alert('Error', 'User not authenticated');
-        return;
-      }
 
-      const deviceName = device.label || device.name || 'Unnamed Device';
-      
-      // Create test alert data
-      const testAlert: MLAlert = {
-        deviceId: device.id,
-        deviceIdentifier: deviceName,
-        riskLabel: 'Test',
-        detectedObjects: ['Test Notification'],
-        description: [`This is a test notification from ${deviceName}`, 'Testing notification system'],
-        confidenceScore: 0.95,
-        screenshots: [],
-        timestamp: new Date() as any,
-        alertGeneratedAt: Date.now(),
-        modelVersion: 'test-v1.0',
-        acknowledged: false
-      };
-
-      // Save to Firestore (the listener will automatically send notification)
-      const firestore = getFirestore();
-      const alertRef = await addDoc(
-        collection(firestore, 'users', userId, 'mlAlerts'),
+      const response = await fetch(
+        `${API_URL}/api/sensors?deviceId=${deviceId}`,
         {
-          ...testAlert,
-          timestamp: serverTimestamp()
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY || '',
+            'x-user-id': userId || '',
+          },
         }
       );
 
-      console.log('[TestNotification] Alert saved to Firestore:', alertRef.id);
-      console.log('[TestNotification] Notification will be sent by listener');
-      Alert.alert('✅ Test Sent', `Test notification sent for ${deviceName}`);
-      
-    } catch (error: any) {
-      console.error('[TestNotification] Error:', error);
-      Alert.alert('Error', `Failed to send test notification: ${error.message}`);
-    } finally {
-      setSendingTestNotification(null);
-    }
-  };
-
-  // ============================================
-  // DATA RECORDING FUNCTIONS
-  // ============================================
-
-  const startRecording = async () => {
-    if (!selectedDeviceForRecording) return;
-
-    setIsRecording(true);
-    setRecordedData([]);
-    recordedDataRef.current = [];
-    setRecordingStartTime(new Date());
-    setShowRecordingModal(false);
-
-    console.log('[Recording] Started for device:', selectedDeviceForRecording.name, 'Duration:', recordingDuration, 'min');
-
-    Alert.alert(
-      "Recording Started",
-      `Recording sensor data for ${recordingDuration} minutes...`,
-      [{ text: "OK" }]
-    );
-
-    // Fetch sensor data immediately, then every 5 seconds
-    const fetchData = async () => {
-      try {
-        const API_URL = process.env.EXPO_PUBLIC_API_URL;
-        const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
-        const userId = auth.currentUser?.uid;
-
-        console.log('[Recording] Fetching data...', API_URL);
-
-        // Fetch all sensors for this device
-        const sensorsResponse = await fetch(
-          `${API_URL}/api/sensors?deviceId=${selectedDeviceForRecording.id}`,
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': API_KEY || '',
-              'x-user-id': userId || '',
-            },
-          }
-        );
-
-        if (!sensorsResponse.ok) {
-          console.log('[Recording] Sensors fetch failed:', sensorsResponse.status);
-          throw new Error('Failed to fetch sensors');
-        }
-        
-        const sensors = await sensorsResponse.json();
-        console.log('[Recording] Found sensors:', sensors.length);
-
-        // Fetch latest reading for each sensor
-        for (const sensor of sensors) {
-          const readingsResponse = await fetch(
-            `${API_URL}/api/readings/${sensor.sensor_id}?hours=1&limit=1`,
-            {
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': API_KEY || '',
-                'x-user-id': userId || '',
-              },
-            }
-          );
-
-          if (readingsResponse.ok) {
-            const readings = await readingsResponse.json();
-            if (readings.length > 0) {
-              const dataPoint = {
-                deviceId: selectedDeviceForRecording.id,
-                deviceName: selectedDeviceForRecording.label || selectedDeviceForRecording.name,
-                sensorId: sensor.sensor_id,
-                sensorName: sensor.sensor_name,
-                sensorType: sensor.sensor_type,
-                timestamp: new Date(readings[0].time),
-                value: readings[0].value,
-                unit: sensor.unit,
-              };
-              console.log('[Recording] Data point:', sensor.sensor_name, readings[0].value);
-              recordedDataRef.current.push(dataPoint);
-              setRecordedData(prev => [...prev, dataPoint]);
-            }
-          }
-        }
-      } catch (error) {
-        console.error('[Recording] Error fetching data:', error);
+      if (response.ok) {
+        const sensors = await response.json();
+        setDeviceSensors(sensors);
+        console.log('[Dashboard] Fetched sensors:', sensors.length);
+      } else {
+        console.error('[Dashboard] Failed to fetch sensors:', response.status);
+        showStyledAlert('Error', 'Failed to fetch sensors', 'error');
       }
-    };
-
-    // Fetch immediately
-    await fetchData();
-    
-    // Then fetch every 5 seconds
-    const intervalId = setInterval(fetchData, 5000);
-
-    recordingIntervalRef.current = intervalId;
-
-    // Stop recording after specified duration
-    setTimeout(() => {
-      stopRecording();
-    }, recordingDuration * 60 * 1000);
-  };
-
-  const stopRecording = () => {
-    const dataCount = recordedDataRef.current.length;
-    console.log('[Recording] Stopping... Total data points:', dataCount);
-    
-    if (recordingIntervalRef.current) {
-      clearInterval(recordingIntervalRef.current);
-      recordingIntervalRef.current = null;
-    }
-
-    setIsRecording(false);
-
-    if (dataCount > 0) {
-      exportToCSV();
-    } else {
-      console.log('[Recording] No data captured!');
-      Alert.alert('No Data', 'No data was recorded during this session. Please check if the device is sending data.');
+    } catch (error) {
+      console.error('[Dashboard] Error fetching sensors:', error);
+      showStyledAlert('Error', 'Failed to fetch sensors', 'error');
+    } finally {
+      setLoadingSensors(false);
     }
   };
 
-  const exportToCSV = async () => {
-    const dataToExport = recordedDataRef.current;
-    if (dataToExport.length === 0) {
-      console.log('[Export] No data in ref');
-      return;
-    }
-
+  // Toggle sensor state
+  const toggleSensorState = async (sensor: any) => {
     try {
-      console.log('[Export] Exporting', dataToExport.length, 'data points');
+      const API_URL = process.env.EXPO_PUBLIC_API_URL;
+      const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
+      const userId = auth.currentUser?.uid;
+
+      const newState = !sensor.enabled;
       
-      const firstTimestamp = dataToExport[0].timestamp.getTime();
-      const lastTimestamp = dataToExport[dataToExport.length - 1].timestamp.getTime();
-      const deviceName = dataToExport[0].deviceName.replace(/[^a-z0-9]/gi, '_');
-      
-      const fileName = `${deviceName}_${firstTimestamp}_${lastTimestamp}.csv`;
+      const response = await fetch(
+        `${API_URL}/api/sensors/${sensor.sensor_id}/state`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY || '',
+            'x-user-id': userId || '',
+          },
+          body: JSON.stringify({ enabled: newState }),
+        }
+      );
 
-      // Create CSV content
-      const csvHeader = 'Timestamp,Device Name,Sensor Name,Sensor Type,Value,Unit\n';
-      const csvRows = dataToExport.map(row => 
-        `${row.timestamp.toISOString()},${row.deviceName},${row.sensorName},${row.sensorType},${row.value},${row.unit}`
-      ).join('\n');
-
-      const csvContent = csvHeader + csvRows;
-      console.log('[Export] CSV size:', csvContent.length, 'bytes');
-
-      if (Platform.OS === 'android') {
-        // Use react-native-fs for reliable file system access on Android
-        const downloadsPath = RNFS.DownloadDirectoryPath;
-        const filePath = `${downloadsPath}/${fileName}`;
-        
-        console.log('[Export] Writing to Downloads:', filePath);
-        
-        // Write CSV to Downloads folder
-        await RNFS.writeFile(filePath, csvContent, 'utf8');
-        
-        console.log('[Export] File written successfully');
-
-        Alert.alert(
-          'Export Complete',
-          `Recorded ${dataToExport.length} data points.\n\nFile saved to Downloads:\n${fileName}\n\nYou can open it with Excel, Google Sheets, or any spreadsheet app.`,
-          [
-            { 
-              text: 'Open File', 
-              onPress: () => {
-                // Try to share/open the file
-                Share.share({
-                  title: 'Open CSV File',
-                  message: `File saved: ${fileName}`,
-                  url: `file://${filePath}`,
-                }).catch(err => console.log('[Export] Share error:', err));
-              }
-            },
-            { text: 'OK' }
-          ]
+      if (response.ok) {
+        // Update local state
+        setDeviceSensors(prev =>
+          prev.map(s =>
+            s.sensor_id === sensor.sensor_id ? { ...s, enabled: newState } : s
+          )
+        );
+        setSelectedSensor({ ...sensor, enabled: newState });
+        showStyledAlert(
+          'Success',
+          `${sensor.sensor_name} ${newState ? 'enabled' : 'disabled'}`,
+          'success'
         );
       } else {
-        // Fallback for iOS or web
-        const result = await Share.share({
-          title: 'Export Sensor Data CSV',
-          message: `${fileName}\n\n${csvContent}`,
-        });
-
-        if (result.action === Share.sharedAction) {
-          Alert.alert(
-            'Export Complete',
-            `Recorded ${dataToExport.length} data points.\n\nShared as text - copy and paste into Excel/Sheets.`,
-            [{ text: 'OK' }]
-          );
-        }
+        showStyledAlert('Error', 'Failed to update sensor state', 'error');
       }
-
-      // Clear recorded data
-      setRecordedData([]);
-      recordedDataRef.current = [];
-      setRecordingStartTime(null);
     } catch (error) {
-      console.error('[Export] Error:', error);
-      Alert.alert('Export Failed', `Could not export data: ${error.message}`);
+      console.error('[Dashboard] Error toggling sensor:', error);
+      showStyledAlert('Error', 'Failed to update sensor state', 'error');
     }
   };
-
-  // Clean up recording on unmount
-  useEffect(() => {
-    return () => {
-      if (recordingIntervalRef.current) {
-        clearInterval(recordingIntervalRef.current);
-      }
-    };
-  }, []);
 
   const user = auth.currentUser;
 
@@ -751,8 +605,6 @@ export default function Dashboard() {
       {/* Alerts Tab */}
       {activeTab === "alerts" && (
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>🤖 Detection Alerts</Text>
-
           {loading ? (
             <ActivityIndicator size="large" style={styles.loader} />
           ) : mlAlerts.length === 0 ? (
@@ -779,15 +631,24 @@ export default function Dashboard() {
                   low: "🟢",
                 };
                 const riskLevel = item.riskLabel?.toLowerCase() || "medium";
+                
+                // Support both old and new field names for backward compatibility
+                const ratingAccuracy = item.ratingAccuracy !== undefined ? item.ratingAccuracy : (item as any).accuracyFeedback;
+                
+                // Debug log
+                if (ratingAccuracy !== null && ratingAccuracy !== undefined) {
+                  console.log("[Dashboard] Alert", item.id, 'ratingAccuracy:', ratingAccuracy);
+                }
 
                 return (
                   <TouchableOpacity
                     style={[
                       styles.mlAlertCard,
-                      { borderLeftColor: riskColors[riskLevel] || "#FFD700", borderLeftWidth: 4 },
-                      // Add background color based on accuracy feedback
-                      item.accuracyFeedback === true && { backgroundColor: "#E8F5E9" }, // Light green for accurate
-                      item.accuracyFeedback === false && { backgroundColor: "#FFEBEE" }, // Light red for inaccurate
+                      { 
+                        borderLeftColor: riskColors[riskLevel] || "#FFD700", 
+                        borderLeftWidth: 4,
+                        backgroundColor: ratingAccuracy === true ? "#E8F5E9" : ratingAccuracy === false ? "#FFEBEE" : "#fff"
+                      },
                     ]}
                     onPress={() => {
                       setSelectedMLAlert(item);
@@ -815,16 +676,15 @@ export default function Dashboard() {
                     )}
 
                     <View style={styles.mlAlertFooter}>
-                      {item.confidenceScore !== null && item.confidenceScore !== undefined && (
-                        <Text style={styles.mlAlertConfidence}>
-                          📊 {(item.confidenceScore * 100).toFixed(0)}%
+                      {/* Accuracy Feedback Badge - Always Show */}
+                      <View style={[
+                        styles.accuracyBadge,
+                        ratingAccuracy === true ? styles.accurateBadge : ratingAccuracy === false ? styles.inaccurateBadge : styles.unratedBadge
+                      ]}>
+                        <Text style={styles.accuracyBadgeText}>
+                          {ratingAccuracy === true ? "✓ Accurate" : ratingAccuracy === false ? "✗ Inaccurate" : "⭘ Not rated"}
                         </Text>
-                      )}
-                      {item.screenshots && item.screenshots.length > 0 && (
-                        <Text style={styles.mlAlertScreenshot}>
-                          📸 {item.screenshots.length} image
-                        </Text>
-                      )}
+                      </View>
                       {item.acknowledged && (
                         <Text style={styles.mlAlertAcknowledged}>✅</Text>
                       )}
@@ -874,23 +734,6 @@ export default function Dashboard() {
                     <View style={styles.deviceInfo}>
                       <Text style={styles.deviceLabel}>{item.label || item.name || "Unnamed Device"}</Text>
                       <Text style={styles.deviceId}>{item.id}</Text>
-                      
-                      {latestReading && (
-                        <View style={styles.readingInfo}>
-                          <Text style={styles.readingValue}>
-                            📊 Latest: {latestReading.value?.toFixed?.(2) ?? latestReading.value}
-                          </Text>
-                          <Text style={styles.readingTime}>
-                            {latestReading.timestamp?.toDate?.().toLocaleTimeString?.()}
-                          </Text>
-                        </View>
-                      )}
-
-                      {deviceReadings[item.id]?.length > 0 && (
-                        <Text style={styles.readingCount}>
-                          📈 {deviceReadings[item.id].length} readings
-                        </Text>
-                      )}
                     </View>
 
                     <View style={styles.deviceActions}>
@@ -898,17 +741,13 @@ export default function Dashboard() {
                         <TouchableOpacity
                           style={[styles.actionBtn, styles.sensorBtn]}
                           onPress={() => {
-                            router.push({
-                              pathname: "/sensor-list",
-                              params: {
-                                deviceId: item.id,
-                                deviceName: item.label || item.name || "Unnamed Device",
-                              },
-                            });
+                            setSelectedDeviceForSensorControl(item);
+                            setShowSensorControlModal(true);
+                            fetchDeviceSensors(item.id);
                           }}
                         >
-                          <Text style={styles.actionBtnText}>📊</Text>
-                          <Text style={styles.actionBtnLabel}>Sensors</Text>
+                          <MaterialIcons name="settings-remote" size={20} />
+                          <Text style={styles.actionBtnLabel}>Sensor Control</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={[styles.actionBtn, styles.editBtn]}
@@ -917,42 +756,16 @@ export default function Dashboard() {
                             setShowVideoPlayer(true);
                           }}
                         >
-                          <Text style={styles.actionBtnText}>📹</Text>
+                          <MaterialIcons name="videocam" size={20} />
                           <Text style={styles.actionBtnLabel}>Camera</Text>
                         </TouchableOpacity>
                       </View>
                       <View style={styles.actionRow}>
                         <TouchableOpacity
-                          style={[styles.actionBtn, styles.recordBtn]}
-                          onPress={() => {
-                            setSelectedDeviceForRecording(item);
-                            setShowRecordingModal(true);
-                          }}
-                        >
-                          <Text style={styles.actionBtnText}>{isRecording && selectedDeviceForRecording?.id === item.id ? '⏹️' : '⏺️'}</Text>
-                          <Text style={styles.actionBtnLabel}>Record</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.actionBtn, styles.testBtn]}
-                          onPress={() => handleSendTestNotification(item)}
-                          disabled={sendingTestNotification === item.id}
-                        >
-                          {sendingTestNotification === item.id ? (
-                            <ActivityIndicator size="small" color="#fff" />
-                          ) : (
-                            <>
-                              <Text style={styles.actionBtnText}>🧪</Text>
-                              <Text style={styles.actionBtnLabel}>Test</Text>
-                            </>
-                          )}
-                        </TouchableOpacity>
-                      </View>
-                      <View style={styles.actionRow}>
-                        <TouchableOpacity
                           style={[styles.actionBtn, styles.deleteBtn]}
-                          onPress={() => handleUnclaimDevice(item.id, item.label)}
+                          onPress={() => handleUnclaimDevice(item.id, item.label || item.name || "Unnamed Device")}
                         >
-                          <Text style={styles.actionBtnText}>🗑️</Text>
+                          <MaterialIcons name="delete" size={20} />
                           <Text style={styles.actionBtnLabel}>Remove</Text>
                         </TouchableOpacity>
                       </View>
@@ -1353,34 +1166,34 @@ export default function Dashboard() {
                   <Text style={styles.buttonText}>Close</Text>
                 </TouchableOpacity>
 
-                {!selectedMLAlert.rating && mlAlertAccuracy !== null && mlAlertRating !== null && (
+                {!selectedMLAlert.rating && !selectedMLAlert.userRating && mlAlertAccuracy !== null && mlAlertRating !== null && (
                   <TouchableOpacity
                     style={[styles.button, styles.submitButton]}
                     onPress={async () => {
                       try {
-                        // For user-level ML alerts (from polling), use updateMLAlertRating directly
-                        if (!selectedMLAlert.deviceId) {
-                          await updateMLAlertRating(
-                            selectedMLAlert.id!,
-                            mlAlertRating,
-                            mlAlertAccuracy
-                          );
-                        } else {
-                          // For device-level alerts, use rateMLAlert
-                          await rateMLAlert(
-                            selectedMLAlert.deviceId,
-                            selectedMLAlert.id!,
-                            mlAlertRating,
-                            mlAlertAccuracy
-                          );
-                        }
-                        Alert.alert("✅ Feedback Saved", "Thank you for rating this alert");
+                        // Alerts are in users/{userId}/mlAlerts collection, use updateMLAlertRating
+                        await updateMLAlertRating(
+                          selectedMLAlert.id!,
+                          mlAlertRating,
+                          mlAlertAccuracy
+                        );
+                        
+                        // Update local state immediately to reflect the change
+                        setMLAlerts(prevAlerts => 
+                          prevAlerts.map(alert => 
+                            alert.id === selectedMLAlert.id 
+                              ? { ...alert, userRating: mlAlertRating, ratingAccuracy: mlAlertAccuracy, ratedAt: new Date() }
+                              : alert
+                          )
+                        );
+                        
+                        showStyledAlert("Feedback Saved", "Thank you for rating this alert", "success");
                         setShowMLAlertDetailModal(false);
                         setSelectedMLAlert(null);
                         setMLAlertRating(null);
                         setMLAlertAccuracy(null);
                       } catch (error) {
-                        Alert.alert("Error", "Failed to save feedback");
+                        showStyledAlert("Error", "Failed to save feedback", "error");
                       }
                     }}
                   >
@@ -1486,24 +1299,14 @@ export default function Dashboard() {
             </View>
 
             <View style={styles.videoPlayerContent}>
-              {selectedDeviceForVideo?.ipAddress || selectedDeviceForVideo?.ip_address ? (
-                <MJPEGVideoPlayer
-                  streamUrl={`http://${selectedDeviceForVideo.ipAddress || selectedDeviceForVideo.ip_address}:8080/stream.mjpeg`}
-                  deviceLabel={selectedDeviceForVideo?.name || "Camera"}
-                  onClose={() => {
-                    setShowVideoPlayer(false);
-                    setSelectedDeviceForVideo(null);
-                  }}
-                />
-              ) : (
-                <View style={styles.videoPlaceholder}>
-                  <Text style={styles.videoPlaceholderText}>🎥</Text>
-                  <Text style={styles.videoPlaceholderLabel}>No Camera Connected</Text>
-                  <Text style={styles.videoPlaceholderSubtext}>
-                    This device does not have a camera or IP address configured
-                  </Text>
-                </View>
-              )}
+              <MJPEGVideoPlayer
+                streamUrl={`http://${selectedDeviceForVideo?.ipAddress || selectedDeviceForVideo?.ip_address}:8080/stream.mjpeg`}
+                deviceLabel={selectedDeviceForVideo?.label || selectedDeviceForVideo?.name || 'Camera'}
+                onClose={() => {
+                  setShowVideoPlayer(false);
+                  setSelectedDeviceForVideo(null);
+                }}
+              />
             </View>
 
             <View style={styles.videoPlayerFooter}>
@@ -1521,77 +1324,117 @@ export default function Dashboard() {
         </View>
       </Modal>
 
-      {/* Data Recording Settings Modal */}
+      {/* Sensor Control Modal */}
       <Modal
-        visible={showRecordingModal}
+        visible={showSensorControlModal}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowRecordingModal(false)}
+        onRequestClose={() => setShowSensorControlModal(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>⏺️ Record Sensor Data</Text>
+            <Text style={styles.modalTitle}>🎛️ Sensor Control</Text>
             <Text style={styles.modalSubtitle}>
-              {selectedDeviceForRecording?.label || selectedDeviceForRecording?.name}
+              {selectedDeviceForSensorControl?.label || selectedDeviceForSensorControl?.name}
             </Text>
 
-            <View style={styles.recordingOptions}>
-              <Text style={styles.optionLabel}>Recording Duration:</Text>
-              
-              <TouchableOpacity
-                style={[
-                  styles.durationButton,
-                  recordingDuration === 5 && styles.durationButtonActive
-                ]}
-                onPress={() => setRecordingDuration(5)}
-              >
-                <Text style={[
-                  styles.durationButtonText,
-                  recordingDuration === 5 && styles.durationButtonTextActive
-                ]}>
-                  5 Minutes
-                </Text>
-              </TouchableOpacity>
+            {loadingSensors ? (
+              <ActivityIndicator size="large" style={{ marginVertical: 20 }} />
+            ) : deviceSensors.length === 0 ? (
+              <Text style={styles.emptyText}>No sensors found</Text>
+            ) : selectedSensor ? (
+              // Sensor Detail View
+              <View style={styles.sensorDetailContainer}>
+                <TouchableOpacity
+                  onPress={() => setSelectedSensor(null)}
+                  style={styles.backButton}
+                >
+                  <MaterialIcons name="arrow-back" size={24} color="#7C3AED" />
+                  <Text style={styles.backButtonText}>Back</Text>
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[
-                  styles.durationButton,
-                  recordingDuration === 10 && styles.durationButtonActive
-                ]}
-                onPress={() => setRecordingDuration(10)}
-              >
-                <Text style={[
-                  styles.durationButtonText,
-                  recordingDuration === 10 && styles.durationButtonTextActive
-                ]}>
-                  10 Minutes
-                </Text>
-              </TouchableOpacity>
+                <View style={styles.sensorDetailCard}>
+                  <Text style={styles.sensorDetailName}>{selectedSensor.sensor_name}</Text>
+                  <Text style={styles.sensorDetailType}>{selectedSensor.sensor_type}</Text>
+                  
+                  <View style={styles.sensorStateContainer}>
+                    <Text style={styles.stateLabel}>Status:</Text>
+                    <View style={[
+                      styles.stateBadge,
+                      selectedSensor.enabled ? styles.enabledBadge : styles.disabledBadge
+                    ]}>
+                      <Text style={styles.stateBadgeText}>
+                        {selectedSensor.enabled ? '🟢 Enabled' : '🔴 Disabled'}
+                      </Text>
+                    </View>
+                  </View>
 
-              <Text style={styles.recordingInfo}>
-                ℹ️ Data will be collected every 5 seconds and saved as CSV file
-              </Text>
-            </View>
+                  <TouchableOpacity
+                    style={[
+                      styles.toggleButton,
+                      selectedSensor.enabled ? styles.disableButton : styles.enableButton
+                    ]}
+                    onPress={() => toggleSensorState(selectedSensor)}
+                  >
+                    <MaterialIcons
+                      name={selectedSensor.enabled ? "toggle-on" : "toggle-off"}
+                      size={24}
+                      color="#fff"
+                    />
+                    <Text style={styles.toggleButtonText}>
+                      {selectedSensor.enabled ? 'Turn Off' : 'Turn On'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              // Sensors List View
+              <FlatList
+                data={deviceSensors}
+                scrollEnabled={true}
+                keyExtractor={(item) => item.sensor_id}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.sensorListItem}
+                    onPress={() => setSelectedSensor(item)}
+                  >
+                    <View style={styles.sensorListItemContent}>
+                      <Text style={styles.sensorListItemName}>{item.sensor_name}</Text>
+                      <Text style={styles.sensorListItemType}>{item.sensor_type}</Text>
+                    </View>
+                    <View style={[
+                      styles.sensorListItemBadge,
+                      item.enabled ? styles.enabledBadge : styles.disabledBadge
+                    ]}>
+                      <Text style={styles.sensorListItemBadgeText}>
+                        {item.enabled ? '🟢' : '🔴'}
+                      </Text>
+                    </View>
+                    <MaterialIcons name="chevron-right" size={24} color="#999" />
+                  </TouchableOpacity>
+                )}
+              />
+            )}
 
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={() => setShowRecordingModal(false)}
-              >
-                <Text style={styles.modalButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.startButton]}
-                onPress={startRecording}
-              >
-                <Text style={[styles.modalButtonText, styles.startButtonText]}>
-                  Start Recording
-                </Text>
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              style={[styles.modalButton, styles.cancelButton]}
+              onPress={() => setShowSensorControlModal(false)}
+            >
+              <Text style={styles.modalButtonText}>Close</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
+
+      {/* Styled Alert Component */}
+      <StyledAlert 
+        visible={styledAlertVisible}
+        title={styledAlertConfig.title}
+        message={styledAlertConfig.message}
+        type={styledAlertConfig.type}
+        buttons={styledAlertConfig.buttons}
+        onClose={() => setStyledAlertVisible(false)}
+      />
     </ScrollView>
     </LinearGradient>
   );
@@ -2331,7 +2174,6 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
   },
   mlAlertCard: {
-    backgroundColor: "#fff",
     borderRadius: 10,
     padding: 14,
     marginBottom: 12,
@@ -2340,6 +2182,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 3,
+    backgroundColor: "#fff",
   },
   mlAlertHeader: {
     flexDirection: "row",
@@ -2372,12 +2215,35 @@ const styles = StyleSheet.create({
   },
   mlAlertFooter: {
     flexDirection: "row",
-    justifyContent: "space-between",
+    justifyContent: "flex-start",
     alignItems: "center",
     marginTop: 8,
     paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: "#eee",
+    gap: 8,
+  },
+  accuracyBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  accurateBadge: {
+    backgroundColor: "#4CAF50",
+  },
+  inaccurateBadge: {
+    backgroundColor: "#F44336",
+  },
+  unratedBadge: {
+    backgroundColor: "#9E9E9E",
+  },
+  accuracyBadgeText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#FFFFFF",
   },
   mlAlertConfidence: {
     fontSize: 12,
@@ -2553,4 +2419,119 @@ const styles = StyleSheet.create({
   shareBtn: {
     backgroundColor: '#2196F3',
   },
+  sensorDetailContainer: {
+    flex: 1,
+    paddingVertical: 20,
+  },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingHorizontal: 10,
+  },
+  backButtonText: {
+    marginLeft: 8,
+    fontSize: 16,
+    color: '#7C3AED',
+    fontWeight: '600',
+  },
+  sensorDetailCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+    elevation: 3,
+  },
+  sensorDetailName: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: 8,
+  },
+  sensorDetailType: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 20,
+  },
+  sensorStateContainer: {
+    marginBottom: 20,
+  },
+  stateLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 8,
+  },
+  stateBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    alignSelf: 'flex-start',
+  },
+  enabledBadge: {
+    backgroundColor: '#E8F5E9',
+  },
+  disabledBadge: {
+    backgroundColor: '#FFEBEE',
+  },
+  stateBadgeText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
+  },
+  toggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginTop: 20,
+  },
+  enableButton: {
+    backgroundColor: '#4CAF50',
+  },
+  disableButton: {
+    backgroundColor: '#F44336',
+  },
+  toggleButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  sensorListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 12,
+    elevation: 2,
+  },
+  sensorListItemContent: {
+    flex: 1,
+  },
+  sensorListItemName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 4,
+  },
+  sensorListItemType: {
+    fontSize: 12,
+    color: '#999',
+  },
+  sensorListItemBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  sensorListItemBadgeText: {
+    fontSize: 20,
+  },
 });
+

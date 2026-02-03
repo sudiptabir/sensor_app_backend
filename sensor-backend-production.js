@@ -293,6 +293,36 @@ app.post('/api/sensors', verifyApiKey, async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/sensors/:sensorId/state
+ * Update sensor enabled/disabled state
+ */
+app.put('/api/sensors/:sensorId/state', verifyJWT, async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const { enabled } = req.body;
+    
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    
+    const result = await pool.query(
+      `UPDATE sensors SET enabled = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
+      [enabled, sensorId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    console.log(`[Sensor State] Sensor ${sensorId} ${enabled ? 'enabled' : 'disabled'}`);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('[Update Sensor State] Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // SENSOR READINGS
 // ============================================

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DHT11 Temperature & Humidity Sensor Control Script
-Runs on Raspberry Pi and communicates with backend server
+Runs on Raspberry Pi - Only handles sensor on/off control
 """
 
 import time
@@ -20,13 +20,12 @@ BACKEND_URL = "https://web-production-3d9a.up.railway.app"  # Your Railway backe
 DEVICE_ID = "3d49c55d-bbfd-4bd0-9663-8728d64743ac"  # Raspberry Pi device ID from admin portal
 SENSOR_ID = 6  # DHT11 Sensor ID (integer)
 DHT_PIN = board.D4  # GPIO4
-UPDATE_INTERVAL = 2  # seconds
+STATUS_CHECK_INTERVAL = 5  # Check backend status every 5 seconds
 
 def get_local_ip():
     """Get the local IP address of this Raspberry Pi"""
     import socket
     try:
-        # Create a socket to determine local IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
@@ -45,7 +44,6 @@ def register_device_ip():
         
         print(f"📍 Local IP: {ip_address}")
         
-        # Update device metadata with IP address
         url = f"{BACKEND_URL}/api/devices/{DEVICE_ID}/metadata"
         response = requests.put(
             url,
@@ -65,8 +63,6 @@ def register_device_ip():
 # Global State
 # ============================================
 sensor_enabled = True
-current_temperature = None
-current_humidity = None
 dht = None
 
 # ============================================
@@ -77,19 +73,16 @@ class SensorHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle GET requests"""
-        global sensor_enabled, current_temperature, current_humidity
+        global sensor_enabled
         
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         query = parse_qs(parsed_url.query)
         
         if path == '/sensor/status':
-            # Return current sensor status
             response = {
                 'status': 'ok',
                 'enabled': sensor_enabled,
-                'temperature': current_temperature,
-                'humidity': current_humidity,
                 'device_id': DEVICE_ID,
                 'sensor_id': SENSOR_ID,
                 'timestamp': time.time()
@@ -97,24 +90,25 @@ class SensorHandler(BaseHTTPRequestHandler):
             self._send_response(200, response)
         
         elif path == '/sensor/control':
-            # Handle sensor control commands
             action = query.get('action', [''])[0]
             
             if action == 'on':
                 sensor_enabled = True
-                response = {'status': 'Sensor turned ON'}
+                print("✅ Sensor turned ON")
+                response = {'status': 'Sensor turned ON', 'enabled': True}
                 self._send_response(200, response)
             
             elif action == 'off':
                 sensor_enabled = False
-                response = {'status': 'Sensor turned OFF'}
+                print("⏸️  Sensor turned OFF")
+                response = {'status': 'Sensor turned OFF', 'enabled': False}
                 self._send_response(200, response)
             
             else:
                 self._send_response(400, {'error': 'Invalid action. Use ?action=on or ?action=off'})
         
         elif path == '/health':
-            self._send_response(200, {'status': 'ok'})
+            self._send_response(200, {'status': 'ok', 'sensor_enabled': sensor_enabled})
         
         else:
             self._send_response(404, {'error': 'Not found'})
@@ -132,77 +126,12 @@ class SensorHandler(BaseHTTPRequestHandler):
         pass
 
 # ============================================
-# Sensor Reading Function
-# ============================================
-def read_sensor():
-    """Read temperature and humidity from DHT11"""
-    global current_temperature, current_humidity, dht, sensor_enabled
-    
-    if dht is None:
-        try:
-            dht = adafruit_dht.DHT11(DHT_PIN)
-        except Exception as e:
-            print(f"❌ Failed to initialize DHT11: {e}")
-            return None, None
-    
-    if not sensor_enabled:
-        print("⏸️  Sensor is disabled")
-        return None, None
-    
-    try:
-        temperature = dht.temperature
-        humidity = dht.humidity
-        
-        if temperature is not None and humidity is not None:
-            current_temperature = temperature
-            current_humidity = humidity
-            return temperature, humidity
-        else:
-            print("❌ Failed to read sensor - values are None")
-            return None, None
-    
-    except RuntimeError as e:
-        print(f"❌ Reading error: {e}")
-        return None, None
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        return None, None
-
-# ============================================
-# Send Data to Backend
-# ============================================
-def send_to_backend(temperature, humidity):
-    """Send sensor readings to backend"""
-    try:
-        payload = {
-            'device_id': DEVICE_ID,
-            'sensor_id': SENSOR_ID,
-            'temperature': temperature,
-            'humidity': humidity,
-            'timestamp': time.time()
-        }
-        
-        response = requests.post(
-            f"{BACKEND_URL}/api/readings",
-            json=payload,
-            timeout=5
-        )
-        
-        if response.status_code == 201:
-            print(f"✅ Data sent to backend: {temperature}°C, {humidity}%")
-        else:
-            print(f"⚠️  Backend returned {response.status_code}")
-    
-    except requests.exceptions.ConnectionError:
-        print(f"⚠️  Cannot connect to backend at {BACKEND_URL}")
-    except Exception as e:
-        print(f"⚠️  Error sending to backend: {e}")
-
-# ============================================
 # Check Sensor Status from Backend
 # ============================================
 def check_sensor_status():
     """Check if sensor is enabled in backend database"""
+    global sensor_enabled
+    
     try:
         response = requests.get(
             f"{BACKEND_URL}/api/sensors?deviceId={DEVICE_ID}",
@@ -213,45 +142,39 @@ def check_sensor_status():
             sensors = response.json()
             for sensor in sensors:
                 if sensor.get('sensor_id') == SENSOR_ID:
-                    return sensor.get('is_active', True)
+                    backend_enabled = sensor.get('enabled', True)
+                    
+                    # Update local state if changed
+                    if backend_enabled != sensor_enabled:
+                        sensor_enabled = backend_enabled
+                        status = "ON" if sensor_enabled else "OFF"
+                        print(f"🔄 Sensor state updated from backend: {status}")
+                    
+                    return backend_enabled
         
-        # If can't reach backend or sensor not found, default to enabled
-        return True
-    except:
-        # If backend unreachable, continue working
-        return True
+        return sensor_enabled
+    except Exception as e:
+        print(f"⚠️  Error checking backend status: {e}")
+        return sensor_enabled
 
 # ============================================
-# Main Sensor Loop
+# Status Monitoring Loop
 # ============================================
-def sensor_loop():
-    """Main loop to read sensor and send data"""
-    print(f"🚀 Starting sensor loop (Device: {DEVICE_ID}, Sensor: {SENSOR_ID})")
+def status_monitor_loop():
+    """Monitor sensor status from backend"""
+    print(f"🔍 Starting status monitor (Device: {DEVICE_ID}, Sensor: {SENSOR_ID})")
     
     while True:
         try:
-            # Check if sensor is enabled in backend
-            is_active = check_sensor_status()
-            
-            if not is_active:
-                print("⏸️  Sensor is disabled - skipping reading")
-                time.sleep(UPDATE_INTERVAL)
-                continue
-            
-            temperature, humidity = read_sensor()
-            
-            if temperature is not None and humidity is not None:
-                print(f"📊 Temperature: {temperature}°C | Humidity: {humidity}%")
-                send_to_backend(temperature, humidity)
-            
-            time.sleep(UPDATE_INTERVAL)
+            check_sensor_status()
+            time.sleep(STATUS_CHECK_INTERVAL)
         
         except KeyboardInterrupt:
-            print("🛑 Sensor loop interrupted")
+            print("🛑 Status monitor interrupted")
             break
         except Exception as e:
-            print(f"❌ Error in sensor loop: {e}")
-            time.sleep(UPDATE_INTERVAL)
+            print(f"❌ Error in status monitor: {e}")
+            time.sleep(STATUS_CHECK_INTERVAL)
 
 # ============================================
 # Start HTTP Server
@@ -260,7 +183,7 @@ def start_http_server(port=5000):
     """Start HTTP server to handle commands"""
     server = HTTPServer(('0.0.0.0', port), SensorHandler)
     print(f"🌐 HTTP Server started on port {port}")
-    print(f"📍 Endpoints:")
+    print(f"📍 Control Endpoints:")
     print(f"   - GET http://localhost:{port}/sensor/status")
     print(f"   - GET http://localhost:{port}/sensor/control?action=on")
     print(f"   - GET http://localhost:{port}/sensor/control?action=off")
@@ -273,7 +196,9 @@ def start_http_server(port=5000):
 # ============================================
 if __name__ == "__main__":
     try:
-        print("🚀 Initializing DHT11 Sensor...")
+        print("🚀 Initializing DHT11 Sensor Control...")
+        print("ℹ️  This script only handles sensor on/off control")
+        print("ℹ️  No sensor data will be sent to backend")
         
         # Register device IP with backend
         register_device_ip()
@@ -282,8 +207,8 @@ if __name__ == "__main__":
         server_thread = threading.Thread(target=start_http_server, args=(5000,), daemon=True)
         server_thread.start()
         
-        # Run sensor loop in main thread
-        sensor_loop()
+        # Run status monitor in main thread
+        status_monitor_loop()
     
     except Exception as e:
         print(f"❌ Fatal error: {e}")

@@ -724,24 +724,29 @@ export async function getUserMLAlerts(limit: number = 100): Promise<MLAlert[]> {
     const user = auth.currentUser;
     if (!user) throw new Error("User not authenticated");
 
-    // Get all user devices
-    const userDevices = await getUserDevices();
-    const allAlerts: MLAlert[] = [];
+    console.log("[Firestore] getUserMLAlerts: Fetching for user", user.uid);
 
-    // Fetch alerts from each device
-    for (const device of userDevices) {
-      const deviceAlerts = await getDeviceMLAlerts(device.id, limit);
-      allAlerts.push(...deviceAlerts);
-    }
+    // Alerts are stored in users/{userId}/mlAlerts collection (by Cloud Function)
+    // NOT in devices/{deviceId}/alerts
+    const q = query(
+      collection(db, "users", user.uid, "mlAlerts")
+    );
 
-    // Sort by timestamp descending
-    return allAlerts
+    const snapshot = await getDocs(q);
+    const allAlerts = snapshot.docs
+      .map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      } as MLAlert))
       .sort((a, b) => {
         const timeA = a.timestamp?.toMillis?.() || 0;
         const timeB = b.timestamp?.toMillis?.() || 0;
         return timeB - timeA;
       })
       .slice(0, limit);
+
+    console.log("[Firestore] getUserMLAlerts: Found", allAlerts.length, "alerts in users collection");
+    return allAlerts;
   } catch (error) {
     console.error("[Firestore] Error getting user ML alerts:", error);
     throw error;
@@ -824,7 +829,7 @@ export async function updateMLAlertRating(
 
     await updateDoc(alertRef, {
       userRating: Math.min(10, Math.max(1, rating)), // Clamp 1-10
-      accuracyFeedback: isAccurate !== undefined ? isAccurate : null,
+      ratingAccuracy: isAccurate !== undefined ? isAccurate : null,
       ratingNotes: notes || null,
       ratedAt: serverTimestamp(),
       acknowledged: true,
@@ -881,6 +886,57 @@ export async function deleteMLAlert(
   } catch (error) {
     console.error("[Firestore] Error deleting ML alert:", error);
     throw error;
+  }
+}
+
+/**
+ * 🔍 Debug function - Check raw Firestore collections
+ */
+export async function debugCheckAlertsCollections() {
+  try {
+    const user = auth.currentUser;
+    if (!user) {
+      console.error("[Debug] No user authenticated");
+      return;
+    }
+
+    console.log("[Debug] Checking all alerts collections for user:", user.uid);
+
+    // Get all user devices
+    const userDevices = await getUserDevices();
+    console.log("[Debug] User devices:", userDevices.map(d => ({ id: d.id, label: d.label })));
+
+    // Check each device's alerts collection
+    for (const device of userDevices) {
+      console.log(`\n[Debug] Checking alerts for device: ${device.id} (${device.label})`);
+      
+      const alertsRef = collection(db, "devices", device.id, "alerts");
+      const snapshot = await getDocs(alertsRef);
+      
+      console.log(`[Debug] Raw collection size: ${snapshot.docs.length} documents`);
+      
+      snapshot.docs.forEach((doc, index) => {
+        console.log(`[Debug]   Alert ${index + 1}:`, {
+          id: doc.id,
+          ...doc.data(),
+        });
+      });
+    }
+
+    // Also check users/{userId}/mlAlerts collection
+    console.log(`\n[Debug] Checking users/${user.uid}/mlAlerts collection`);
+    const userAlertsRef = collection(db, "users", user.uid, "mlAlerts");
+    const userAlertsSnapshot = await getDocs(userAlertsRef);
+    console.log(`[Debug] User mlAlerts collection size: ${userAlertsSnapshot.docs.length} documents`);
+    userAlertsSnapshot.docs.forEach((doc, index) => {
+      console.log(`[Debug]   User Alert ${index + 1}:`, {
+        id: doc.id,
+        ...doc.data(),
+      });
+    });
+
+  } catch (error) {
+    console.error("[Debug] Error checking collections:", error);
   }
 }
 
