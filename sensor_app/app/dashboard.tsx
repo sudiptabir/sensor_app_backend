@@ -16,8 +16,9 @@ import type { MLAlert } from "../types/mlAlertTypes";
 import SensorCard from "../components/SensorCard";
 import IconButton from "../components/IconButton";
 import StyledAlert, { StyledAlertProps } from "../components/StyledAlert";
-import { getFirestore, collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, serverTimestamp, getDocs, deleteDoc, doc, query, where, Timestamp } from 'firebase/firestore';
 import { SvgUri } from 'react-native-svg';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -44,6 +45,8 @@ export default function Dashboard() {
   const [showVideoPlayer, setShowVideoPlayer] = useState(false);
   const [selectedDeviceForVideo, setSelectedDeviceForVideo] = useState<any | null>(null);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [alertRetentionDays, setAlertRetentionDays] = useState<7 | 15 | 30 | 0>(30); // Default 30 days (1 month), 0 = never
   const [streamingMode, setStreamingMode] = useState<"http" | "webrtc">("http");
   const [showMLAlertDetailModal, setShowMLAlertDetailModal] = useState(false);
   const [selectedMLAlert, setSelectedMLAlert] = useState<MLAlert | null>(null);
@@ -294,6 +297,22 @@ export default function Dashboard() {
     setupNotifications();
   }, []);
 
+  // Load alert retention setting on mount
+  useEffect(() => {
+    loadAlertRetentionSetting();
+  }, []);
+
+  // Auto-delete old alerts periodically
+  useEffect(() => {
+    // Run immediately
+    autoDeleteOldAlerts();
+    
+    // Run every hour (instead of every minute for longer retention periods)
+    const interval = setInterval(autoDeleteOldAlerts, 3600000); // 1 hour
+    
+    return () => clearInterval(interval);
+  }, [alertRetentionDays]);
+
   const handleLogout = async () => {
     try {
       setLoggingOut(true);
@@ -532,6 +551,78 @@ export default function Dashboard() {
     } catch (error) {
       console.error('[Dashboard] Error toggling sensor:', error);
       showStyledAlert('Error', 'Failed to update sensor state', 'error');
+    }
+  };
+
+  // Load alert retention setting
+  const loadAlertRetentionSetting = async () => {
+    try {
+      const saved = await AsyncStorage.getItem('alertRetentionDays');
+      if (saved) {
+        setAlertRetentionDays(parseInt(saved) as 7 | 15 | 30 | 0);
+      }
+    } catch (error) {
+      console.error('[Dashboard] Error loading retention setting:', error);
+    }
+  };
+
+  // Save alert retention setting
+  const saveAlertRetentionSetting = async (days: 7 | 15 | 30 | 0) => {
+    try {
+      await AsyncStorage.setItem('alertRetentionDays', days.toString());
+      setAlertRetentionDays(days);
+      
+      if (days === 0) {
+        showStyledAlert('Success', 'Alerts will never be auto-deleted', 'success');
+      } else {
+        showStyledAlert('Success', `Alerts older than ${days} days will be auto-deleted`, 'success');
+      }
+    } catch (error) {
+      console.error('[Dashboard] Error saving retention setting:', error);
+      showStyledAlert('Error', 'Failed to save setting', 'error');
+    }
+  };
+
+  // Auto-delete old alerts
+  const autoDeleteOldAlerts = async () => {
+    try {
+      // Skip if retention is set to "never"
+      if (alertRetentionDays === 0) {
+        return;
+      }
+
+      const userId = auth.currentUser?.uid;
+      if (!userId) return;
+
+      const db = getFirestore();
+      const alertsRef = collection(db, 'users', userId, 'mlAlerts');
+      
+      // Calculate cutoff time
+      const cutoffTime = new Date();
+      cutoffTime.setDate(cutoffTime.getDate() - alertRetentionDays);
+      
+      // Query old alerts
+      const q = query(
+        alertsRef,
+        where('timestamp', '<', Timestamp.fromDate(cutoffTime))
+      );
+      
+      const snapshot = await getDocs(q);
+      
+      if (snapshot.empty) {
+        console.log('[Dashboard] No old alerts to delete');
+        return;
+      }
+
+      // Delete old alerts
+      const deletePromises = snapshot.docs.map(docSnapshot => 
+        deleteDoc(doc(db, 'users', userId, 'mlAlerts', docSnapshot.id))
+      );
+      
+      await Promise.all(deletePromises);
+      console.log(`[Dashboard] Deleted ${snapshot.size} old alerts (older than ${alertRetentionDays} days)`);
+    } catch (error) {
+      console.error('[Dashboard] Error auto-deleting alerts:', error);
     }
   };
 
@@ -1255,6 +1346,16 @@ export default function Dashboard() {
             <View style={styles.profileDivider} />
 
             <TouchableOpacity
+              style={styles.settingsButton}
+              onPress={() => {
+                setShowProfileModal(false);
+                setShowSettingsModal(true);
+              }}
+            >
+              <Text style={styles.settingsButtonText}>⚙️ Settings</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
               style={styles.logoutButton}
               onPress={() => {
                 setShowProfileModal(false);
@@ -1268,6 +1369,126 @@ export default function Dashboard() {
                 <Text style={styles.logoutButtonText}>🚪 Logout</Text>
               )}
             </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Settings Modal */}
+      <Modal
+        visible={showSettingsModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowSettingsModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.profileModalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowSettingsModal(false)}
+        >
+          <View style={styles.profileModalContent}>
+            <View style={styles.profileHeader}>
+              <Text style={styles.settingsTitle}>⚙️ Settings</Text>
+              <TouchableOpacity
+                onPress={() => setShowSettingsModal(false)}
+                style={styles.profileCloseBtn}
+              >
+                <Text style={styles.profileCloseBtnText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.settingsSection}>
+              <Text style={styles.settingsSectionTitle}>Alert Auto-Delete</Text>
+              <Text style={styles.settingsDescription}>
+                Automatically delete alerts older than:
+              </Text>
+
+              <TouchableOpacity
+                style={[
+                  styles.settingsOption,
+                  alertRetentionDays === 7 && styles.settingsOptionActive
+                ]}
+                onPress={() => saveAlertRetentionSetting(7)}
+              >
+                <View style={styles.settingsOptionContent}>
+                  <Text style={[
+                    styles.settingsOptionText,
+                    alertRetentionDays === 7 && styles.settingsOptionTextActive
+                  ]}>
+                    7 days
+                  </Text>
+                  {alertRetentionDays === 7 && (
+                    <Text style={styles.settingsCheckmark}>✓</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.settingsOption,
+                  alertRetentionDays === 15 && styles.settingsOptionActive
+                ]}
+                onPress={() => saveAlertRetentionSetting(15)}
+              >
+                <View style={styles.settingsOptionContent}>
+                  <Text style={[
+                    styles.settingsOptionText,
+                    alertRetentionDays === 15 && styles.settingsOptionTextActive
+                  ]}>
+                    15 days
+                  </Text>
+                  {alertRetentionDays === 15 && (
+                    <Text style={styles.settingsCheckmark}>✓</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.settingsOption,
+                  alertRetentionDays === 30 && styles.settingsOptionActive
+                ]}
+                onPress={() => saveAlertRetentionSetting(30)}
+              >
+                <View style={styles.settingsOptionContent}>
+                  <Text style={[
+                    styles.settingsOptionText,
+                    alertRetentionDays === 30 && styles.settingsOptionTextActive
+                  ]}>
+                    1 month (30 days)
+                  </Text>
+                  {alertRetentionDays === 30 && (
+                    <Text style={styles.settingsCheckmark}>✓</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.settingsOption,
+                  alertRetentionDays === 0 && styles.settingsOptionActive
+                ]}
+                onPress={() => saveAlertRetentionSetting(0)}
+              >
+                <View style={styles.settingsOptionContent}>
+                  <Text style={[
+                    styles.settingsOptionText,
+                    alertRetentionDays === 0 && styles.settingsOptionTextActive
+                  ]}>
+                    Never (keep all alerts)
+                  </Text>
+                  {alertRetentionDays === 0 && (
+                    <Text style={styles.settingsCheckmark}>✓</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <Text style={styles.settingsNote}>
+                {alertRetentionDays === 0 
+                  ? "ℹ️ All alerts will be kept indefinitely"
+                  : `ℹ️ Alerts newer than ${alertRetentionDays} days will be kept`
+                }
+              </Text>
+            </View>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -1788,6 +2009,75 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "bold",
     color: "#ffffff",
+  },
+  settingsButton: {
+    backgroundColor: "#6D28D9",
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    marginBottom: 12,
+    alignItems: "center",
+  },
+  settingsButtonText: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#ffffff",
+  },
+  settingsTitle: {
+    fontSize: 22,
+    fontWeight: "bold",
+    color: "#333",
+  },
+  settingsSection: {
+    marginTop: 20,
+  },
+  settingsSectionTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  settingsDescription: {
+    fontSize: 14,
+    color: "#666",
+    marginBottom: 16,
+  },
+  settingsOption: {
+    backgroundColor: "#f5f5f5",
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 2,
+    borderColor: "transparent",
+  },
+  settingsOptionActive: {
+    backgroundColor: "#E9D5FF",
+    borderColor: "#7C3AED",
+  },
+  settingsOptionContent: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  settingsOptionText: {
+    fontSize: 16,
+    color: "#333",
+    fontWeight: "500",
+  },
+  settingsOptionTextActive: {
+    color: "#7C3AED",
+    fontWeight: "bold",
+  },
+  settingsCheckmark: {
+    fontSize: 20,
+    color: "#7C3AED",
+    fontWeight: "bold",
+  },
+  settingsNote: {
+    fontSize: 13,
+    color: "#666",
+    marginTop: 12,
+    fontStyle: "italic",
   },
   ratingModalContent: {
     backgroundColor: "#fff",
