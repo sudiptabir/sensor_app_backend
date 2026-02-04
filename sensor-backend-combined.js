@@ -428,21 +428,63 @@ app.put('/api/sensors/:sensorId/state', async (req, res) => {
   try {
     const { sensorId } = req.params;
     const { enabled } = req.body;
+    const userId = req.headers['x-user-id']; // Get user ID from header
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User ID required' });
+    }
     
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({ error: 'enabled must be a boolean' });
     }
     
+    // Check if user is blocked
+    const userBlock = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+    
+    if (userBlock.rows.length > 0) {
+      return res.status(403).json({ 
+        error: 'Access denied',
+        reason: 'User is blocked',
+        details: userBlock.rows[0].reason
+      });
+    }
+    
+    // Get sensor's device_id to check device-specific access
+    const sensorInfo = await pool.query(
+      'SELECT device_id FROM sensors WHERE sensor_id = $1',
+      [sensorId]
+    );
+    
+    if (sensorInfo.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    const deviceId = sensorInfo.rows[0].device_id;
+    
+    // Check if user has device-specific access block
+    const deviceAccess = await pool.query(
+      'SELECT * FROM device_access_control WHERE device_id = $1 AND user_id = $2',
+      [deviceId, userId]
+    );
+    
+    if (deviceAccess.rows.length > 0 && deviceAccess.rows[0].is_blocked) {
+      return res.status(403).json({ 
+        error: 'Access denied',
+        reason: 'Access blocked for this device',
+        details: deviceAccess.rows[0].reason
+      });
+    }
+    
+    // Update sensor state
     const result = await pool.query(
       `UPDATE sensors SET enabled = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
       [enabled, sensorId]
     );
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Sensor not found' });
-    }
-    
-    console.log(`[Sensor State] Sensor ${sensorId} ${enabled ? 'enabled' : 'disabled'}`);
+    console.log(`[Sensor State] User ${userId} ${enabled ? 'enabled' : 'disabled'} sensor ${sensorId}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error('[Update Sensor State] Error:', error.message);

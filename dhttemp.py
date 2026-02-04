@@ -54,10 +54,14 @@ def register_device_ip():
         
         if response.status_code in [200, 201]:
             print(f"✅ Device IP registered: {ip_address}")
+        elif response.status_code == 404:
+            print(f"⚠️  Device not found in backend - skipping IP registration")
+            print(f"   (This is OK - device will work without IP registration)")
         else:
             print(f"⚠️  Failed to register IP: {response.status_code}")
     except Exception as e:
         print(f"⚠️  Error registering IP: {e}")
+        print(f"   (This is OK - continuing without IP registration)")
 
 # ============================================
 # Global State

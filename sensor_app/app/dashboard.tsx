@@ -545,6 +545,14 @@ export default function Dashboard() {
           `${sensor.sensor_name} ${newState ? 'enabled' : 'disabled'}`,
           'success'
         );
+      } else if (response.status === 403) {
+        // User is blocked
+        const errorData = await response.json();
+        showStyledAlert(
+          'Access Denied', 
+          errorData.details || errorData.reason || 'You do not have permission to control this sensor',
+          'error'
+        );
       } else {
         showStyledAlert('Error', 'Failed to update sensor state', 'error');
       }
