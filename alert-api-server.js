@@ -207,6 +207,48 @@ async function sendPushNotification(userId, alert, notificationContent) {
 }
 
 /**
+ * Get all users who have access to a device
+ */
+async function getUsersForDevice(deviceId) {
+  if (!firebaseInitialized) {
+    console.log('⚠️  Firebase not initialized, cannot fetch device users');
+    return [];
+  }
+
+  try {
+    const db = admin.firestore();
+    
+    // Get the device document to find its owner
+    const deviceDoc = await db.collection('devices').doc(deviceId).get();
+    
+    // Check if document exists (handle both function and property)
+    const docExists = typeof deviceDoc.exists === 'function' ? deviceDoc.exists() : deviceDoc.exists;
+    
+    if (!docExists) {
+      console.warn('⚠️  Device not found:', deviceId);
+      return [];
+    }
+
+    const deviceData = deviceDoc.data();
+    const ownerUserId = deviceData?.userId;
+
+    if (!ownerUserId) {
+      console.warn('⚠️  Device has no owner:', deviceId);
+      return [];
+    }
+
+    console.log('👤 Device owner:', ownerUserId);
+    
+    // For now, return just the owner
+    // In the future, you could add shared access logic here
+    return [ownerUserId];
+  } catch (error) {
+    console.error('❌ Error getting users for device:', error);
+    return [];
+  }
+}
+
+/**
  * Store alert in Firestore
  */
 async function storeAlertInFirestore(userId, deviceId, alert) {
@@ -277,12 +319,12 @@ app.get('/health', (req, res) => {
 // Receive and process alerts
 app.post('/api/alerts', async (req, res) => {
   try {
-    const { userId, deviceId, alert } = req.body;
+    const { deviceId, alert } = req.body;
 
     // Validate required fields
-    if (!userId || !deviceId || !alert) {
+    if (!deviceId || !alert) {
       return res.status(400).json({
-        error: 'Missing required fields: userId, deviceId, alert'
+        error: 'Missing required fields: deviceId, alert'
       });
     }
 
@@ -293,11 +335,55 @@ app.post('/api/alerts', async (req, res) => {
     }
 
     console.log('🚨 Received alert:', {
-      userId,
       deviceId,
       type: alert.notification_type,
       risk: alert.risk_label,
       objects: alert.detected_objects.join(', ')
+    });
+
+    // Get users for this device
+    const userIds = await getUsersForDevice(deviceId);
+    
+    if (userIds.length === 0) {
+      console.warn('⚠️  No users found for device:', deviceId);
+      return res.json({
+        success: true,
+        message: 'Alert received but no users to notify',
+        alertIds: [],
+        usersNotified: 0
+      });
+    }
+
+    // Generate notification content
+    const notificationContent = generateNotificationContent(alert);
+
+    // Store alert and send notifications for each user
+    const alertIds = [];
+    const pushResults = [];
+
+    for (const userId of userIds) {
+      // Store alert in Firestore
+      const alertId = await storeAlertInFirestore(userId, deviceId, alert);
+      if (alertId && typeof alertId === 'string') {
+        alertIds.push(alertId);
+      }
+
+      // Send push notification
+      const pushResult = await sendPushNotification(userId, alert, notificationContent);
+      if (pushResult) {
+        pushResults.push({ userId, ...pushResult });
+      }
+    }
+
+    // Response
+    res.json({
+      success: true,
+      message: 'Alert processed successfully',
+      alertIds,
+      usersNotified: userIds.length,
+      pushResults,
+      timestamp: new Date().toISOString()
+    });
     });
 
     // Generate notification content
