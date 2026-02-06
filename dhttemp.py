@@ -2,6 +2,17 @@
 """
 DHT11 Temperature & Humidity Sensor Control Script
 Runs on Raspberry Pi - Only handles sensor on/off control
+
+⚠️  IMPORTANT: Blocked User Access Control
+    - All authorization is handled on the backend API
+    - The backend checks if a user is blocked BEFORE sending control commands
+    - This script simply executes commands from authorized requests only
+    - If a blocked user tries to control this sensor:
+      1. Mobile app sends request to backend API with user ID
+      2. Backend checks user_blocks and device_access_control tables
+      3. If user is blocked, backend returns 403 Forbidden error
+      4. No command is sent to this Pi script
+    - Therefore, this script doesn't need additional blocking logic
 """
 
 import time

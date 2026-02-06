@@ -645,9 +645,60 @@ app.get('/api/sensors/:sensorId/control', async (req, res) => {
   try {
     const { sensorId } = req.params;
     const { action } = req.query;
+    const userId = req.headers['x-user-id']; // Get user ID from header
+    
+    console.log(`[Sensor Control GET] Request from user: ${userId} for sensor: ${sensorId}`);
+    
+    if (!userId) {
+      console.log('[Sensor Control GET] No user ID provided');
+      return res.status(401).json({ error: 'User ID required' });
+    }
     
     if (!['on', 'off'].includes(action)) {
       return res.status(400).json({ error: 'Action must be "on" or "off"' });
+    }
+    
+    // Check if user is blocked
+    console.log(`[Sensor Control GET] Checking if user ${userId} is blocked...`);
+    const userBlock = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+    
+    if (userBlock.rows.length > 0) {
+      console.log(`[Sensor Control GET] User ${userId} is BLOCKED: ${userBlock.rows[0].reason}`);
+      return res.status(403).json({ 
+        error: 'Access denied',
+        reason: 'User is blocked',
+        details: userBlock.rows[0].reason
+      });
+    }
+    
+    // Get sensor's device_id to check device-specific access
+    const sensorInfo = await pool.query(
+      'SELECT device_id FROM sensors WHERE sensor_id = $1',
+      [sensorId]
+    );
+    
+    if (sensorInfo.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    const deviceId = sensorInfo.rows[0].device_id;
+    
+    // Check if user has device-specific access block
+    const deviceAccess = await pool.query(
+      'SELECT * FROM device_access_control WHERE device_id = $1 AND user_id = $2',
+      [deviceId, userId]
+    );
+    
+    if (deviceAccess.rows.length > 0 && deviceAccess.rows[0].is_blocked) {
+      console.log(`[Sensor Control GET] User ${userId} blocked for device ${deviceId}`);
+      return res.status(403).json({ 
+        error: 'Access denied',
+        reason: 'Access blocked for this device',
+        details: deviceAccess.rows[0].reason
+      });
     }
     
     const isActive = action === 'on';
@@ -688,9 +739,60 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
   try {
     const { sensorId } = req.params;
     const { action } = req.body;
+    const userId = req.headers['x-user-id']; // Get user ID from header
+    
+    console.log(`[Sensor Control POST] Request from user: ${userId} for sensor: ${sensorId}`);
+    
+    if (!userId) {
+      console.log('[Sensor Control POST] No user ID provided');
+      return res.status(401).json({ error: 'User ID required' });
+    }
     
     if (!['on', 'off'].includes(action)) {
       return res.status(400).json({ error: 'Action must be "on" or "off"' });
+    }
+    
+    // Check if user is blocked
+    console.log(`[Sensor Control POST] Checking if user ${userId} is blocked...`);
+    const userBlock = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+    
+    if (userBlock.rows.length > 0) {
+      console.log(`[Sensor Control POST] User ${userId} is BLOCKED: ${userBlock.rows[0].reason}`);
+      return res.status(403).json({ 
+        error: 'Access denied',
+        reason: 'User is blocked',
+        details: userBlock.rows[0].reason
+      });
+    }
+    
+    // Get sensor info and device_id for device-specific access check
+    const sensorInfo = await pool.query(
+      'SELECT device_id FROM sensors WHERE sensor_id = $1',
+      [sensorId]
+    );
+    
+    if (sensorInfo.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    
+    const deviceId = sensorInfo.rows[0].device_id;
+    
+    // Check if user has device-specific access block
+    const deviceAccess = await pool.query(
+      'SELECT * FROM device_access_control WHERE device_id = $1 AND user_id = $2',
+      [deviceId, userId]
+    );
+    
+    if (deviceAccess.rows.length > 0 && deviceAccess.rows[0].is_blocked) {
+      console.log(`[Sensor Control POST] User ${userId} blocked for device ${deviceId}`);
+      return res.status(403).json({ 
+        error: 'Access denied',
+        reason: 'Access blocked for this device',
+        details: deviceAccess.rows[0].reason
+      });
     }
     
     const isActive = action === 'on';
