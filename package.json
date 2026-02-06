@@ -4,8 +4,8 @@
   "description": "IoT Sensor Backend with PostgreSQL and Real-time WebSocket",
   "main": "sensor-backend.js",
   "scripts": {
-    "start": "node sensor-backend.js",
-    "dev": "node sensor-backend.js"
+    "start": "node railway-server.js",
+    "dev": "node railway-server.js"
   },
   "engines": {
     "node": ">=18.0.0"
