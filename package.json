@@ -2,7 +2,7 @@
   "name": "sensor-iot-backend",
   "version": "1.0.0",
   "description": "IoT Sensor Backend with PostgreSQL and Real-time WebSocket",
-  "main": "sensor-backend.js",
+  "main": "railway-server.js",
   "scripts": {
     "start": "node railway-server.js",
     "dev": "node railway-server.js"
