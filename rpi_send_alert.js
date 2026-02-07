@@ -13,6 +13,8 @@ const https = require('https');
 const RAILWAY_API_URL = "https://alert-api-production-dc04.up.railway.app/api/alerts";
 const DEVICE_ID_FILE = path.join(__dirname, 'device_id.txt');
 const DEVICE_NAME = "raspberrypi";
+// ⚠️  IMPORTANT: Replace with your Firebase user ID (the admin/test user)
+const USER_ID = process.env.ALERT_USER_ID || "GKu2p6uvarhEzrKG85D7fXbxUh23";
 
 /**
  * Read device ID from file
@@ -92,7 +94,8 @@ function sendRequest(url, data, method = 'POST') {
  */
 async function sendAlert(deviceId, riskLevel = "Medium", description = "Test alert from Raspberry Pi") {
   const alertPayload = {
-    deviceId: deviceId,
+    userId: USER_ID,        // ← REQUIRED: Firebase user ID
+    deviceId: deviceId,     // ← REQUIRED: Device identifier
     alert: {
       notification_type: "Alert",
       detected_objects: ["test", "detection"],
@@ -170,6 +173,7 @@ async function main() {
   console.log("=".repeat(60));
   console.log(`Device: ${DEVICE_NAME}`);
   console.log(`Device ID: ${deviceId}`);
+  console.log(`User ID: ${USER_ID}`);
   console.log(`API URL: ${RAILWAY_API_URL}`);
   console.log("=".repeat(60));
   console.log();
