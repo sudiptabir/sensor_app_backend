@@ -459,6 +459,168 @@ app.get('/api/devices/:deviceId', async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/sensors/:sensorId/state
+ * Update sensor enabled/disabled state with access control
+ */
+app.put('/api/sensors/:sensorId/state', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const { enabled } = req.body;
+    const userId = req.headers['x-user-id'];
+
+    console.log(`[Sensor State] Request from user: ${userId} for sensor: ${sensorId}`);
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User ID required' });
+    }
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+
+    // Check if user is blocked globally
+    const userBlock = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+
+    if (userBlock.rows.length > 0) {
+      console.log(`[Sensor State] User ${userId} is BLOCKED`);
+      return res.status(403).json({
+        error: 'Access denied',
+        reason: 'User is blocked',
+        details: userBlock.rows[0].reason
+      });
+    }
+
+    // Get sensor's device_id for device-specific access check
+    const sensorInfo = await pool.query(
+      'SELECT device_id FROM sensors WHERE sensor_id = $1',
+      [sensorId]
+    );
+
+    if (sensorInfo.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+
+    const deviceId = sensorInfo.rows[0].device_id;
+
+    // Check device-specific access block
+    const deviceAccess = await pool.query(
+      'SELECT * FROM device_access_control WHERE device_id = $1 AND user_id = $2 AND is_blocked = true',
+      [deviceId, userId]
+    );
+
+    if (deviceAccess.rows.length > 0) {
+      console.log(`[Sensor State] User ${userId} blocked for device ${deviceId}`);
+      return res.status(403).json({
+        error: 'Access denied',
+        reason: 'Access blocked for this device',
+        details: deviceAccess.rows[0].reason
+      });
+    }
+
+    // Update sensor state
+    const result = await pool.query(
+      `UPDATE sensors SET enabled = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
+      [enabled, sensorId]
+    );
+
+    console.log(`[Sensor State] User ${userId} ${enabled ? 'enabled' : 'disabled'} sensor ${sensorId}`);
+    res.json({
+      success: true,
+      message: `Sensor ${enabled ? 'enabled' : 'disabled'}`,
+      sensor: result.rows[0]
+    });
+  } catch (error) {
+    console.warn('⚠️  Error updating sensor state:', error.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+/**
+ * POST /api/sensors/:sensorId/control
+ * Control sensor on/off via POST with access control
+ */
+app.post('/api/sensors/:sensorId/control', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const { action } = req.body;
+    const userId = req.headers['x-user-id'];
+
+    console.log(`[Sensor Control] Request from user: ${userId} for sensor: ${sensorId}, action: ${action}`);
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User ID required' });
+    }
+
+    if (!['on', 'off'].includes(action)) {
+      return res.status(400).json({ error: 'Action must be "on" or "off"' });
+    }
+
+    // Check if user is blocked globally
+    const userBlock = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+
+    if (userBlock.rows.length > 0) {
+      console.log(`[Sensor Control] User ${userId} is BLOCKED`);
+      return res.status(403).json({
+        error: 'Access denied',
+        reason: 'User is blocked',
+        details: userBlock.rows[0].reason
+      });
+    }
+
+    // Get sensor's device_id for device-specific access check
+    const sensorInfo = await pool.query(
+      'SELECT device_id FROM sensors WHERE sensor_id = $1',
+      [sensorId]
+    );
+
+    if (sensorInfo.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+
+    const deviceId = sensorInfo.rows[0].device_id;
+
+    // Check device-specific access block
+    const deviceAccess = await pool.query(
+      'SELECT * FROM device_access_control WHERE device_id = $1 AND user_id = $2 AND is_blocked = true',
+      [deviceId, userId]
+    );
+
+    if (deviceAccess.rows.length > 0) {
+      console.log(`[Sensor Control] User ${userId} blocked for device ${deviceId}`);
+      return res.status(403).json({
+        error: 'Access denied',
+        reason: 'Access blocked for this device',
+        details: deviceAccess.rows[0].reason
+      });
+    }
+
+    // Update sensor state
+    const isActive = action === 'on';
+    const result = await pool.query(
+      `UPDATE sensors SET is_active = $1, updated_at = NOW() WHERE sensor_id = $2 RETURNING *`,
+      [isActive, sensorId]
+    );
+
+    console.log(`[Sensor Control] User ${userId} turned sensor ${sensorId} ${action.toUpperCase()}`);
+    res.json({
+      success: true,
+      message: `Sensor turned ${action.toUpperCase()}`,
+      is_active: isActive,
+      sensor_id: sensorId
+    });
+  } catch (error) {
+    console.warn('⚠️  Error controlling sensor:', error.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('💥 Unhandled error:', error);
