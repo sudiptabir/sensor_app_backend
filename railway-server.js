@@ -11,10 +11,43 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
 
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Database connection pool
+// Railway provides DATABASE_URL, local dev uses individual vars
+const pool = new Pool(
+  process.env.DATABASE_URL
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }
+      }
+    : {
+        user: process.env.DB_USER || 'postgres',
+        password: process.env.DB_PASSWORD || 'password123',
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT || 5432,
+        database: process.env.DB_NAME || 'sensor_db',
+      }
+);
+
+// Test database connection
+pool.on('error', (err) => {
+  console.error('⚠️  Unexpected pool error:', err);
+});
+
+pool.connect((err, client, done) => {
+  if (err) {
+    console.error('⚠️  Database connection failed:', err);
+    console.log('⚠️  Continuing without database access (sensors disabled)');
+  } else {
+    console.log('✅ Database connected successfully');
+    done();
+  }
+});
 
 // Middleware
 app.use(helmet());
@@ -304,6 +337,128 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+/**
+ * ============================================
+ * SENSOR MANAGEMENT ENDPOINTS
+ * ============================================
+ */
+
+/**
+ * GET /api/sensors
+ * List all active sensors, optionally filtered by deviceId
+ */
+app.get('/api/sensors', async (req, res) => {
+  try {
+    const { deviceId } = req.query;
+    let query = 'SELECT * FROM sensors WHERE is_active = true';
+    let params = [];
+    
+    if (deviceId) {
+      query += ' AND device_id = $1';
+      params.push(deviceId);
+    }
+    
+    query += ' ORDER BY sensor_id DESC';
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.warn('⚠️  Error querying sensors:', error.message);
+    // Return empty array if database not available
+    res.json([]);
+  }
+});
+
+/**
+ * GET /api/sensors/:sensorId
+ * Get specific sensor details
+ */
+app.get('/api/sensors/:sensorId', async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM sensors WHERE sensor_id = $1',
+      [sensorId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sensor not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.warn('⚠️  Error querying sensor:', error.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+/**
+ * PUT /api/devices/:deviceId/metadata
+ * Update device metadata (e.g., IP address for Raspberry Pi)
+ */
+app.put('/api/devices/:deviceId/metadata', async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { ip_address, last_seen, status } = req.body;
+
+    // Check if device exists
+    const deviceCheck = await pool.query(
+      'SELECT * FROM devices WHERE device_id = $1',
+      [deviceId]
+    );
+
+    if (deviceCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    // Update device metadata
+    const updateQuery = `
+      UPDATE devices 
+      SET 
+        ip_address = COALESCE($1, ip_address),
+        last_seen = COALESCE($2, CURRENT_TIMESTAMP),
+        status = COALESCE($3, status),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE device_id = $4
+      RETURNING *
+    `;
+
+    const result = await pool.query(updateQuery, [
+      ip_address || null,
+      last_seen || null,
+      status || null,
+      deviceId
+    ]);
+
+    res.json({
+      success: true,
+      message: 'Device metadata updated',
+      device: result.rows[0]
+    });
+  } catch (error) {
+    console.warn('⚠️  Error updating device metadata:', error.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+/**
+ * GET /api/devices/:deviceId
+ * Get device details
+ */
+app.get('/api/devices/:deviceId', async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM devices WHERE device_id = $1',
+      [deviceId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.warn('⚠️  Error querying device:', error.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('💥 Unhandled error:', error);
@@ -328,6 +483,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🔥 Firebase initialized: ${firebaseInitialized}`);
   console.log(`📡 Alert endpoint: /api/alerts`);
+  console.log(`🌍 Sensor endpoints: /api/sensors`);
   console.log(`💚 Health check: /health`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log('=================================================');
