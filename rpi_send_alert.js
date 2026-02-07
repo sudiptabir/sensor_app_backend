@@ -10,7 +10,7 @@ const path = require('path');
 const https = require('https');
 
 // Configuration
-const RAILWAY_API_URL = "https://web-production-07eda.up.railway.app/api/alerts";
+const RAILWAY_API_URL = "https://alert-api-production-dc04.up.railway.app/api/alerts";
 const DEVICE_ID_FILE = path.join(__dirname, 'device_id.txt');
 const DEVICE_NAME = "raspberrypi";
 

@@ -384,29 +384,6 @@ app.post('/api/alerts', async (req, res) => {
       pushResults,
       timestamp: new Date().toISOString()
     });
-    });
-
-    // Generate notification content
-    const notificationContent = generateNotificationContent(alert);
-
-    // Store alert in Firestore (this will trigger real-time listeners in the app)
-    const alertId = await storeAlertInFirestore(userId, deviceId, alert);
-
-    // Send push notification
-    const pushResult = await sendPushNotification(userId, alert, notificationContent);
-
-    // Response
-    res.json({
-      success: true,
-      message: 'Alert processed successfully',
-      alertId,
-      notification: {
-        title: notificationContent.title,
-        body: notificationContent.body,
-        sent: !!pushResult
-      },
-      timestamp: new Date().toISOString()
-    });
 
   } catch (error) {
     console.error('❌ Error processing alert:', error);
