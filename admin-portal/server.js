@@ -307,29 +307,7 @@ app.get('/devices', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/devices/:deviceId/access', requireAuth, async (req, res) => {
-  try {
-    const { deviceId } = req.params;
-    
-    const [deviceDoc, accessControl] = await Promise.all([
-      db.collection('devices').doc(deviceId).get(),
-      pool.query('SELECT * FROM device_access_control WHERE device_id = $1', [deviceId])
-    ]);
-    
-    if (!deviceDoc.exists) {
-      return res.status(404).send('Device not found');
-    }
-    
-    res.render('device-access', {
-      adminName: req.session.adminName,
-      device: { id: deviceDoc.id, ...deviceDoc.data() },
-      accessList: accessControl.rows
-    });
-  } catch (error) {
-    console.error('[Device Access] Error:', error);
-    res.status(500).send('Error loading device access');
-  }
-});
+// Device removal is now handled by: DELETE /api/devices/:deviceId
 
 // ============================================
 // ROUTES - USER MANAGEMENT
@@ -429,47 +407,69 @@ app.post('/api/users/:userId/unblock', requireAuth, async (req, res) => {
 });
 
 // ============================================
-// API ROUTES - DEVICE ACCESS CONTROL
+// API ROUTES - DEVICE MANAGEMENT
 // ============================================
 
-app.post('/api/devices/:deviceId/grant-access', requireAuth, async (req, res) => {
+/**
+ * DELETE /api/devices/:deviceId
+ * Remove a device from Firestore and all associated data
+ */
+app.delete('/api/devices/:deviceId', requireAuth, async (req, res) => {
   try {
     const { deviceId } = req.params;
-    const { userId, accessLevel, expiresAt } = req.body;
-    
-    await pool.query(
-      `INSERT INTO device_access_control (device_id, user_id, access_level, granted_by, expires_at)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (device_id, user_id) 
-       DO UPDATE SET access_level = $3, granted_by = $4, expires_at = $5, is_blocked = false`,
-      [deviceId, userId, accessLevel, req.session.adminEmail, expiresAt || null]
-    );
-    
-    logAction(req.session.adminEmail, 'GRANT_ACCESS', 'device', deviceId, { userId, accessLevel }, req.ip);
-    
-    res.json({ success: true, message: 'Access granted successfully' });
-  } catch (error) {
-    console.error('[Grant Access] Error:', error);
-    res.status(500).json({ error: 'Failed to grant access' });
-  }
-});
 
-app.post('/api/devices/:deviceId/revoke-access', requireAuth, async (req, res) => {
-  try {
-    const { deviceId } = req.params;
-    const { userId, reason } = req.body;
-    
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Device ID is required' });
+    }
+
+    console.log(`🗑️  Attempting to remove device: ${deviceId}`);
+
+    // 1. Delete from Firestore devices collection
+    await db.collection('devices').doc(deviceId).delete();
+    console.log(`✅ Deleted from Firestore devices: ${deviceId}`);
+
+    // 2. Delete from device_access_control table (PostgreSQL)
     await pool.query(
-      'UPDATE device_access_control SET is_blocked = true, reason = $3 WHERE device_id = $1 AND user_id = $2',
-      [deviceId, userId, reason]
+      'DELETE FROM device_access_control WHERE device_id = $1',
+      [deviceId]
     );
-    
-    logAction(req.session.adminEmail, 'REVOKE_ACCESS', 'device', deviceId, { userId, reason }, req.ip);
-    
-    res.json({ success: true, message: 'Access revoked successfully' });
+    console.log(`✅ Deleted from device_access_control: ${deviceId}`);
+
+    // 3. Delete sensors associated with this device
+    await pool.query(
+      'DELETE FROM sensors WHERE device_id = $1',
+      [deviceId]
+    );
+    console.log(`✅ Deleted sensors for device: ${deviceId}`);
+
+    // 4. Delete sensor readings
+    await pool.query(
+      `DELETE FROM sensor_readings 
+       WHERE sensor_id IN (SELECT sensor_id FROM sensors WHERE device_id = $1)`,
+      [deviceId]
+    );
+    console.log(`✅ Deleted sensor readings for device: ${deviceId}`);
+
+    // Log the action
+    logAction(req.session.adminEmail, 'REMOVE_DEVICE', 'device', deviceId, {}, req.ip);
+
+    res.json({ 
+      success: true, 
+      message: `Device ${deviceId} has been successfully removed`,
+      removedData: {
+        device: 'Removed from Firestore',
+        accessControl: 'All access records deleted',
+        sensors: 'All sensors deleted',
+        sensorReadings: 'All readings deleted'
+      }
+    });
+
   } catch (error) {
-    console.error('[Revoke Access] Error:', error);
-    res.status(500).json({ error: 'Failed to revoke access' });
+    console.error('[Remove Device] Error:', error);
+    res.status(500).json({ 
+      error: 'Failed to remove device', 
+      details: error.message 
+    });
   }
 });
 

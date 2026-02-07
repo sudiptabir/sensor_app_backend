@@ -65,9 +65,9 @@
                     </td>
                     <td><%= device.lastSeen ? new Date(device.lastSeen).toLocaleString() : 'Never' %></td>
                     <td>
-                      <a href="/devices/<%= device.id %>/access" class="btn btn-sm btn-primary">
-                        <i class="bi bi-key"></i> Manage Access
-                      </a>
+                      <button class="btn btn-sm btn-danger" onclick="removeDevice('<%= device.id %>', '<%= device.name || 'Device' %>')">
+                        <i class="bi bi-trash"></i> Remove Device
+                      </button>
                     </td>
                   </tr>
                 <% }); %>
@@ -88,6 +88,34 @@
         row.style.display = text.includes(searchTerm) ? '' : 'none';
       });
     });
+
+    async function removeDevice(deviceId, deviceName) {
+      const confirmed = confirm(`Are you sure you want to remove device "${deviceName}"? This will:\n\n✓ Deregister the device from Firestore\n✓ Remove all device details\n✓ Remove all access control records\n\nThis action cannot be undone.`);
+      
+      if (!confirmed) return;
+
+      try {
+        console.log('Removing device:', deviceId);
+        const response = await fetch(`/api/devices/${deviceId}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin'
+        });
+
+        const data = await response.json();
+        console.log('Response:', data);
+
+        if (response.ok) {
+          alert(`Device "${deviceName}" removed successfully`);
+          location.reload();
+        } else {
+          alert(`Failed to remove device: ${data.error || 'Unknown error'}`);
+        }
+      } catch (error) {
+        console.error('Error removing device:', error);
+        alert(`Error: ${error.message}`);
+      }
+    }
   </script>
 </body>
 </html>
