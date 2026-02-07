@@ -185,6 +185,11 @@ function requireAuth(req, res, next) {
   if (req.session && req.session.adminEmail) {
     return next();
   }
+  // For API requests, return JSON error instead of redirecting
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Admin session required' });
+  }
+  // For page requests, redirect to login
   res.redirect('/login');
 }
 
