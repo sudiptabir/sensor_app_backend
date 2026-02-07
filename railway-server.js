@@ -621,6 +621,107 @@ app.post('/api/sensors/:sensorId/control', async (req, res) => {
   }
 });
 
+/**
+ * ============================================
+ * USER ACCESS CONTROL ENDPOINTS
+ * ============================================
+ */
+
+/**
+ * POST /api/users/:userId/block
+ * Block a user globally from accessing sensors
+ */
+app.post('/api/users/:userId/block', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { reason } = req.body;
+
+    if (!userId || !reason) {
+      return res.status(400).json({ error: 'User ID and reason are required' });
+    }
+
+    // Check if already blocked
+    const existing = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'User is already blocked' });
+    }
+
+    // Insert block record
+    await pool.query(
+      `INSERT INTO user_blocks (user_id, is_active, reason)
+       VALUES ($1, true, $2)
+       ON CONFLICT (user_id) DO UPDATE 
+       SET is_active = true, reason = $2, blocked_at = NOW()`,
+      [userId, reason]
+    );
+
+    console.log(`[User Block] User ${userId} blocked with reason: ${reason}`);
+    res.json({ success: true, message: 'User blocked successfully' });
+  } catch (error) {
+    console.warn('⚠️  Error blocking user:', error.message);
+    res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+/**
+ * POST /api/users/:userId/unblock
+ * Unblock a user to allow access again
+ */
+app.post('/api/users/:userId/unblock', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    // Update block status
+    const result = await pool.query(
+      `UPDATE user_blocks SET is_active = false WHERE user_id = $1 RETURNING *`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User block not found' });
+    }
+
+    console.log(`[User Unblock] User ${userId} unblocked`);
+    res.json({ success: true, message: 'User unblocked successfully' });
+  } catch (error) {
+    console.warn('⚠️  Error unblocking user:', error.message);
+    res.status(500).json({ error: 'Database error', details: error.message });
+  }
+});
+
+/**
+ * GET /api/users/:userId/status
+ * Get user block status
+ */
+app.get('/api/users/:userId/status', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const result = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+
+    res.json({
+      userId,
+      isBlocked: result.rows.length > 0,
+      reason: result.rows[0]?.reason || null,
+      blockedAt: result.rows[0]?.blocked_at || null
+    });
+  } catch (error) {
+    console.warn('⚠️  Error checking user status:', error.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('💥 Unhandled error:', error);
