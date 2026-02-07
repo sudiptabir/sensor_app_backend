@@ -424,25 +424,62 @@ app.delete('/api/devices/:deviceId', requireAuth, async (req, res) => {
 
     console.log(`🗑️  Attempting to remove device: ${deviceId}`);
 
-    // 1. Delete from Firestore devices collection
-    await db.collection('devices').doc(deviceId).delete();
-    console.log(`✅ Deleted from Firestore devices: ${deviceId}`);
+    // 1. Delete device document and all its subcollections from Firestore
+    const deviceDocRef = db.collection('devices').doc(deviceId);
+    
+    // Get all subcollections of this device document
+    const subcollections = await deviceDocRef.listCollections();
+    
+    // Delete each subcollection
+    for (const subcollection of subcollections) {
+      const docs = await subcollection.get();
+      for (const doc of docs.docs) {
+        await doc.ref.delete();
+      }
+      console.log(`✅ Deleted subcollection: ${subcollection.id}`);
+    }
+    
+    // Delete the device document itself
+    await deviceDocRef.delete();
+    console.log(`✅ Deleted device from Firestore: ${deviceId}`);
 
-    // 2. Delete from device_access_control table (PostgreSQL)
+    // 2. Check and delete from users/{userId}/devices/{deviceId} if it exists
+    const usersSnapshot = await db.collection('users').get();
+    let deviceFoundInUsers = false;
+    for (const userDoc of usersSnapshot.docs) {
+      const userDevicesRef = userDoc.ref.collection('devices').doc(deviceId);
+      const userDeviceSnap = await userDevicesRef.get();
+      if (userDeviceSnap.exists) {
+        // Delete any subcollections of this user's device
+        const userDeviceSubcollections = await userDevicesRef.listCollections();
+        for (const subCol of userDeviceSubcollections) {
+          const subDocs = await subCol.get();
+          for (const subDoc of subDocs.docs) {
+            await subDoc.ref.delete();
+          }
+        }
+        // Delete the device from user's collection
+        await userDevicesRef.delete();
+        deviceFoundInUsers = true;
+        console.log(`✅ Deleted device from user ${userDoc.id}'s devices subcollection`);
+      }
+    }
+
+    // 3. Delete from device_access_control table (PostgreSQL)
     await pool.query(
       'DELETE FROM device_access_control WHERE device_id = $1',
       [deviceId]
     );
     console.log(`✅ Deleted from device_access_control: ${deviceId}`);
 
-    // 3. Delete sensors associated with this device
+    // 4. Delete sensors associated with this device
     await pool.query(
       'DELETE FROM sensors WHERE device_id = $1',
       [deviceId]
     );
     console.log(`✅ Deleted sensors for device: ${deviceId}`);
 
-    // 4. Delete sensor readings
+    // 5. Delete sensor readings
     await pool.query(
       `DELETE FROM sensor_readings 
        WHERE sensor_id IN (SELECT sensor_id FROM sensors WHERE device_id = $1)`,
@@ -450,17 +487,32 @@ app.delete('/api/devices/:deviceId', requireAuth, async (req, res) => {
     );
     console.log(`✅ Deleted sensor readings for device: ${deviceId}`);
 
+    // 6. Delete any ML alerts related to this device
+    const alertsSnapshot = await db.collection('mlAlerts')
+      .where('deviceId', '==', deviceId)
+      .get();
+    
+    for (const alertDoc of alertsSnapshot.docs) {
+      await alertDoc.ref.delete();
+    }
+    
+    if (alertsSnapshot.size > 0) {
+      console.log(`✅ Deleted ${alertsSnapshot.size} ML alerts for device: ${deviceId}`);
+    }
+
     // Log the action
     logAction(req.session.adminEmail, 'REMOVE_DEVICE', 'device', deviceId, {}, req.ip);
 
     res.json({ 
       success: true, 
-      message: `Device ${deviceId} has been successfully removed`,
+      message: `Device ${deviceId} has been successfully removed from all locations`,
       removedData: {
-        device: 'Removed from Firestore',
-        accessControl: 'All access records deleted',
-        sensors: 'All sensors deleted',
-        sensorReadings: 'All readings deleted'
+        device: 'Removed from Firestore devices collection',
+        userDevices: deviceFoundInUsers ? 'Removed from user subcollections' : 'Not found in user collections',
+        accessControl: 'All access records deleted from PostgreSQL',
+        sensors: 'All sensors deleted from PostgreSQL',
+        sensorReadings: 'All readings deleted from PostgreSQL',
+        alerts: `ML alerts cleaned up`
       }
     });
 
