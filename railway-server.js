@@ -198,6 +198,32 @@ async function sendPushNotification(userId, alert, notificationContent) {
 }
 
 /**
+ * Check if user is blocked
+ */
+async function isUserBlocked(userId) {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+    
+    if (result.rows.length > 0) {
+      console.log(`🚫 User ${userId} is BLOCKED: ${result.rows[0].reason}`);
+      return {
+        blocked: true,
+        reason: result.rows[0].reason
+      };
+    }
+    
+    return { blocked: false };
+  } catch (error) {
+    console.error('❌ Error checking user block status:', error);
+    // On error, allow alert (fail open for availability)
+    return { blocked: false };
+  }
+}
+
+/**
  * Store alert in Firestore
  */
 async function storeAlertInFirestore(userId, deviceId, alert) {
@@ -283,6 +309,16 @@ app.post('/api/alerts', async (req, res) => {
     if (!alert.detected_objects || !alert.risk_label) {
       return res.status(400).json({
         error: 'Invalid alert data: missing detected_objects or risk_label'
+      });
+    }
+
+    // ⚠️  CHECK IF SENDING USER IS BLOCKED
+    const blockStatus = await isUserBlocked(userId);
+    if (blockStatus.blocked) {
+      console.log(`🚫 REJECTED alert from blocked user ${userId}: ${blockStatus.reason}`);
+      return res.status(403).json({
+        error: 'User is blocked and cannot send alerts',
+        reason: blockStatus.reason
       });
     }
 
