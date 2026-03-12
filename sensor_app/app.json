@@ -17,7 +17,7 @@
       }
     },
     "android": {
-      "package": "com.gmail.sudiptabir.sensorapp",
+      "package": "com.gmail.rutaghacs.rutagapp",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundColor": "#E6F4FE"
@@ -70,8 +70,8 @@
       "reactCompiler": true
     },
     "extra": {
-      "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "968944435256-uu583289rveimgcvfg9m1k83ldrnbmmt.apps.googleusercontent.com",
-      "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "968944435256-9k295e1jdfacv0tv3bs5luifsf8nmahl.apps.googleusercontent.com",
+      "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "411882758714-bptcdm2rf4c4goeitv2rifbn1u73o4dn.apps.googleusercontent.com",
+      "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "411882758714-avcdrl36jnirs18ii6n27vc53on45c2u.apps.googleusercontent.com",
       "router": {},
       "eas": {
         "projectId": "61f78825-5a24-4965-9cac-2d11d2cf3391"

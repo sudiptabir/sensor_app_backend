@@ -4,7 +4,7 @@
  */
 
 // Get admin portal URL from environment
-const ADMIN_PORTAL_URL = process.env.EXPO_PUBLIC_ADMIN_PORTAL_URL || 'http://192.168.43.211:4000';
+const ADMIN_PORTAL_URL = process.env.EXPO_PUBLIC_ADMIN_PORTAL_URL || 'http://13.205.201.82';
 const API_KEY = process.env.EXPO_PUBLIC_API_KEY || 'test-api-key-123';
 
 interface AccessCheckResult {

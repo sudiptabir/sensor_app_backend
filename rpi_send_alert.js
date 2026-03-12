@@ -2,15 +2,23 @@
 
 /**
  * 🚨 Alert Sender for Raspberry Pi (Node.js Version)
- * Sends alerts to Railway Alert API
+ * Sends alerts to Alert API and checks access via Admin Portal
  */
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const https = require('https');
 
 // Configuration
-const RAILWAY_API_URL = "https://alert-api-production-dc04.up.railway.app/api/alerts";
+const ALERT_API_URL =
+  process.env.ALERT_API_URL ||
+  process.env.RAILWAY_API_URL ||
+  "https://alert-api-production-dc04.up.railway.app/api/alerts";
+
+const ADMIN_PORTAL_URL = process.env.ADMIN_PORTAL_URL || 'http://localhost:4000';
+const API_KEY = process.env.API_KEY || process.env.ADMIN_API_KEY || 'test-api-key-123';
+const CHECK_ACCESS_BEFORE_SEND = (process.env.CHECK_ACCESS_BEFORE_SEND || 'true').toLowerCase() !== 'false';
 const DEVICE_ID_FILE = path.join(__dirname, 'device_id.txt');
 const DEVICE_NAME = "raspberrypi";
 // ⚠️  IMPORTANT: Replace with your Firebase user ID (the admin/test user)
@@ -43,25 +51,30 @@ function readDeviceId() {
 /**
  * Send HTTP request (GET or POST)
  */
-function sendRequest(url, data, method = 'POST') {
+function sendRequest(url, data, method = 'POST', extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
+    const isHttps = urlObj.protocol === 'https:';
+    const client = isHttps ? https : http;
     
     const options = {
       hostname: urlObj.hostname,
-      port: urlObj.port || 443,
+      port: urlObj.port || (isHttps ? 443 : 80),
       path: urlObj.pathname + urlObj.search,
       method: method,
       headers: {
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 5000,
     };
+
+    options.headers = { ...options.headers, ...extraHeaders };
 
     if (method === 'POST' && data) {
       options.headers['Content-Length'] = Buffer.byteLength(JSON.stringify(data));
     }
 
-    const req = https.request(options, (res) => {
+    const req = client.request(options, (res) => {
       let responseData = '';
 
       res.on('data', (chunk) => {
@@ -82,6 +95,10 @@ function sendRequest(url, data, method = 'POST') {
       reject(error);
     });
 
+    req.on('timeout', () => {
+      req.destroy(new Error('Request timeout'));
+    });
+
     if (method === 'POST' && data) {
       req.write(JSON.stringify(data));
     }
@@ -90,7 +107,42 @@ function sendRequest(url, data, method = 'POST') {
 }
 
 /**
- * Send an alert to the Railway API
+ * Check whether user has access to the device via Admin Portal.
+ */
+async function checkDeviceAccess(userId, deviceId) {
+  const url = `${ADMIN_PORTAL_URL}/api/check-access/${encodeURIComponent(userId)}/${encodeURIComponent(deviceId)}`;
+
+  try {
+    const response = await sendRequest(url, null, 'GET', {
+      'X-API-Key': API_KEY,
+    });
+
+    if (response.status !== 200 || typeof response.data !== 'object') {
+      return {
+        reachable: false,
+        hasAccess: true,
+        reason: `Unexpected admin portal response: HTTP ${response.status}`,
+      };
+    }
+
+    return {
+      reachable: true,
+      hasAccess: response.data.hasAccess !== false,
+      accessLevel: response.data.accessLevel || 'default',
+      reason: response.data.reason || null,
+      details: response.data.details || null,
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      hasAccess: true,
+      reason: `Admin portal check failed: ${error.message}`,
+    };
+  }
+}
+
+/**
+ * Send an alert to the Alert API
  */
 async function sendAlert(deviceId, riskLevel = "Medium", description = "Test alert from Raspberry Pi") {
   const alertPayload = {
@@ -117,9 +169,9 @@ async function sendAlert(deviceId, riskLevel = "Medium", description = "Test ale
 
   try {
     console.log(`🚨 Sending ${riskLevel} alert...`);
-    console.log(`📡 API URL: ${RAILWAY_API_URL}`);
+    console.log(`📡 API URL: ${ALERT_API_URL}`);
 
-    const response = await sendRequest(RAILWAY_API_URL, alertPayload);
+    const response = await sendRequest(ALERT_API_URL, alertPayload);
 
     console.log(`✅ Response Status: ${response.status}`);
 
@@ -142,7 +194,7 @@ async function sendAlert(deviceId, riskLevel = "Medium", description = "Test ale
  * Test if the API is healthy
  */
 async function testHealth() {
-  const healthUrl = RAILWAY_API_URL.replace("/api/alerts", "/health");
+  const healthUrl = ALERT_API_URL.replace("/api/alerts", "/health");
   
   try {
     console.log(`🏥 Testing health endpoint...`);
@@ -174,13 +226,36 @@ async function main() {
   console.log(`Device: ${DEVICE_NAME}`);
   console.log(`Device ID: ${deviceId}`);
   console.log(`User ID: ${USER_ID}`);
-  console.log(`API URL: ${RAILWAY_API_URL}`);
+  console.log(`Alert API URL: ${ALERT_API_URL}`);
+  console.log(`Admin Portal URL: ${ADMIN_PORTAL_URL}`);
+  console.log(`Access precheck: ${CHECK_ACCESS_BEFORE_SEND ? 'enabled' : 'disabled'}`);
   console.log("=".repeat(60));
   console.log();
 
+  if (CHECK_ACCESS_BEFORE_SEND) {
+    console.log('🔐 Checking user/device access via admin portal...');
+    const access = await checkDeviceAccess(USER_ID, deviceId);
+
+    if (!access.reachable) {
+      console.warn(`⚠️  ${access.reason}`);
+      console.warn('⚠️  Continuing in fail-open mode; alert API will do final block checks.');
+    } else if (!access.hasAccess) {
+      console.error('🚫 Access denied by admin portal. Alerts will not be sent.');
+      console.error(`   Reason: ${access.reason || 'No access'}`);
+      if (access.details) {
+        console.error(`   Details: ${access.details}`);
+      }
+      process.exit(1);
+    } else {
+      console.log(`✅ Access granted (level: ${access.accessLevel || 'default'})`);
+    }
+
+    console.log();
+  }
+
   // Test health first
   if (!(await testHealth())) {
-    console.log("\n❌ API is not responding. Check your Railway URL and internet connection.");
+    console.log("\n❌ Alert API is not responding. Check ALERT_API_URL and internet connection.");
     process.exit(1);
   }
 

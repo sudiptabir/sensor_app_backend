@@ -7,7 +7,7 @@ import * as Google from "expo-auth-session/providers/google";
 
 WebBrowser.maybeCompleteAuthSession();
 
-const GOOGLE_WEB_CLIENT_ID = "968944435256-74nt68dipdouo64p0kejipf1vin3h5oh.apps.googleusercontent.com";
+const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || "411882758714-bptcdm2rf4c4goeitv2rifbn1u73o4dn.apps.googleusercontent.com";
 
 export default function LoginScreen({ navigation }) {
   const [loading, setLoading] = useState(false);

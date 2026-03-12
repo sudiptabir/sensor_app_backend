@@ -14,8 +14,6 @@ const webClientId =
 GoogleSignin.configure({
   webClientId: webClientId,
   offlineAccess: true,
-  forceCodeForRefreshToken: true,
-  accountName: "",
 });
 
 export default function LoginScreen() {
@@ -75,6 +73,13 @@ export default function LoginScreen() {
     } catch (error: any) {
       console.error("[Login] ❌ Error:", error.code, error.message);
       console.error("[Login] Full error:", JSON.stringify(error, null, 2));
+
+      if (error?.code === "10") {
+        console.error(
+          "[Login] Android DEVELOPER_ERROR (10): OAuth mismatch. Check Firebase Android app package + SHA-1/SHA-256, then re-download google-services.json."
+        );
+      }
+
       setLoading(false);
       if (error.code === statusCodes.SIGN_IN_CANCELLED) {
         console.log("[Login] User cancelled");

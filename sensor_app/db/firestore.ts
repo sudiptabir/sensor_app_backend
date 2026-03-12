@@ -4,6 +4,7 @@ import {
   where,
   getDocs,
   addDoc,
+  setDoc,
   updateDoc,
   deleteDoc,
   doc,
@@ -79,8 +80,11 @@ export const listenToUserDevices = (callback: (devices: any[]) => void) => {
 
   console.log("[Firestore] Setting up real-time listener for devices for user:", user.uid);
 
-  // Try without where clause first to test if listener works at all
-  const devicesRef = collection(db, "devices");
+  // Query only the authenticated user's devices (required for secure rules)
+  const devicesRef = query(
+    collection(db, "devices"),
+    where("userId", "==", user.uid)
+  );
   
   console.log("[Firestore] Query created, attaching listener...");
 
@@ -90,7 +94,7 @@ export const listenToUserDevices = (callback: (devices: any[]) => void) => {
       {
         next: (snapshot) => {
           console.log("[Firestore] ✅ Devices snapshot received! Size:", snapshot.size);
-          const allDevices = snapshot.docs.map((doc) => {
+          const devices = snapshot.docs.map((doc) => {
             const data = doc.data();
             console.log("[Firestore] Device doc:", doc.id, "userId:", data.userId);
             return {
@@ -98,11 +102,8 @@ export const listenToUserDevices = (callback: (devices: any[]) => void) => {
               ...data,
             };
           });
-          
-          // Filter by userId in the callback
-          const devices = allDevices.filter(d => d.userId === user.uid);
-          
-          console.log("[Firestore] Total devices:", allDevices.length, "Filtered for user:", devices.length);
+
+          console.log("[Firestore] User devices found:", devices.length);
           if (devices.length === 0) {
             console.log("[Firestore] ⚠️ No devices found for userId:", user.uid);
           } else {
@@ -175,8 +176,8 @@ export async function addDevice(deviceData: {
 
     let docRef;
     if (finalDeviceId) {
-      // Create with specific device ID
-      await updateDoc(doc(db, "devices", finalDeviceId), deviceDoc);
+      // Create or overwrite with specific device ID
+      await setDoc(doc(db, "devices", finalDeviceId), deviceDoc, { merge: true });
       docRef = { id: finalDeviceId };
     } else {
       // Auto-generate device ID
@@ -331,7 +332,12 @@ export async function listenToDeviceReadings(
  */
 export async function getAllAvailableDevices() {
   try {
-    const querySnapshot = await getDocs(collection(db, "devices"));
+    // Query only unassigned devices to remain compatible with strict rules.
+    const q = query(
+      collection(db, "devices"),
+      where("userId", "==", null)
+    );
+    const querySnapshot = await getDocs(q);
     return querySnapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
@@ -355,22 +361,8 @@ export async function getAvailableDevicesForUser() {
     const allDevices = await getAllAvailableDevices();
     console.log("[Firestore] All devices from Firestore:", allDevices.length);
     
-    const userDevices = await getUserDevices();
-    console.log("[Firestore] User's current devices:", userDevices.length);
-    
-    const userDeviceIds = new Set(userDevices.map(d => d.id));
-    
-    // Filter devices that either:
-    // 1. Don't have a userId (unassigned)
-    // 2. Have the current user's ID
-    // But exclude ones already in user's device list and test devices
+    // Exclude test devices and invalid docs.
     const available = allDevices.filter((device) => {
-      // Exclude if already in user's device list
-      if (userDeviceIds.has(device.id)) {
-        console.log("[Firestore] Excluding device (already claimed by user):", device.id, device.label);
-        return false;
-      }
-      
       // Exclude test devices
       const label = (device.label || "").toLowerCase();
       const name = (device.name || "").toLowerCase();
@@ -378,13 +370,10 @@ export async function getAvailableDevicesForUser() {
         console.log("[Firestore] Excluding test device:", device.id, device.label);
         return false;
       }
-      
-      // Include if device exists and has real label or name, and not assigned to another user
-      const isAvailable = (device.label || device.name) && device.id && (!device.userId || device.userId === userId);
+
+      const isAvailable = Boolean((device.label || device.name) && device.id);
       if (isAvailable) {
         console.log("[Firestore] Available device:", device.id, device.label, "userId:", device.userId);
-      } else {
-        console.log("[Firestore] Excluding device (claimed by another user):", device.id, device.label, "userId:", device.userId);
       }
       return isAvailable;
     });
@@ -561,10 +550,32 @@ export async function updateAlertRating(deviceId: string, alertId: string, ratin
  */
 export async function deleteTestDevices() {
   try {
-    const devicesSnapshot = await getDocs(collection(db, "devices"));
+    const user = auth.currentUser;
+    if (!user) throw new Error("User not authenticated");
+
+    // Combine owned devices and unassigned devices so the cleanup works
+    // with restrictive security rules.
+    const ownedQuery = query(
+      collection(db, "devices"),
+      where("userId", "==", user.uid)
+    );
+    const unassignedQuery = query(
+      collection(db, "devices"),
+      where("userId", "==", null)
+    );
+
+    const [ownedSnapshot, unassignedSnapshot] = await Promise.all([
+      getDocs(ownedQuery),
+      getDocs(unassignedQuery),
+    ]);
+
+    const combinedDocs = new Map<string, any>();
+    ownedSnapshot.docs.forEach((d) => combinedDocs.set(d.id, d));
+    unassignedSnapshot.docs.forEach((d) => combinedDocs.set(d.id, d));
+
     let deletedCount = 0;
 
-    for (const docSnapshot of devicesSnapshot.docs) {
+    for (const docSnapshot of combinedDocs.values()) {
       const device = docSnapshot.data();
       const deviceLabel = device.label || "";
       const deviceName = device.name || "";
@@ -748,7 +759,12 @@ export async function getUserMLAlerts(limit: number = 100): Promise<MLAlert[]> {
     console.log("[Firestore] getUserMLAlerts: Found", allAlerts.length, "alerts in users collection");
     return allAlerts;
   } catch (error) {
-    console.error("[Firestore] Error getting user ML alerts:", error);
+    // Don't log auth errors as ERROR - they're expected during logout
+    if (error instanceof Error && error.message === "User not authenticated") {
+      console.log("[Firestore] getUserMLAlerts: User not authenticated (expected during logout)");
+    } else {
+      console.error("[Firestore] Error getting user ML alerts:", error);
+    }
     throw error;
   }
 }

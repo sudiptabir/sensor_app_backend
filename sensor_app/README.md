@@ -42,6 +42,39 @@ To learn more about developing your project with Expo, look at the following res
 - [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
 - [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
 
+## Android release signing (for APK distribution outside Play Store)
+
+1. Generate a dedicated release keystore once:
+
+```powershell
+cd android/app
+keytool -genkeypair -v -keystore upload-keystore.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000
+```
+
+2. Create `android/key.properties` from `android/key.properties.example` and set real values:
+
+```properties
+storeFile=app/upload-keystore.jks
+storePassword=YOUR_STORE_PASSWORD
+keyAlias=upload
+keyPassword=YOUR_KEY_PASSWORD
+```
+
+3. Build release APK/AAB. `android/app/build.gradle` now uses this key automatically for `release` builds.
+
+4. Get fingerprint of this release key and add it in Firebase Android app settings:
+
+```powershell
+cd android/app
+keytool -list -v -alias upload -keystore upload-keystore.jks
+```
+
+5. Re-download `google-services.json` from Firebase and replace `sensor_app/google-services.json`, then reinstall a fresh build.
+
+Notes:
+- If `android/key.properties` is missing, release build falls back to debug signing.
+- Keep one stable release keystore for all distributed APKs to avoid Google Sign-In `DEVELOPER_ERROR (10)`.
+
 ## Join the community
 
 Join our community of developers creating universal apps.

@@ -19,6 +19,9 @@ firebase/firebaseConfig.js
 .kotlin/
 *.orig.*
 *.jks
+*.keystore
+key.properties
+android/key.properties
 *.p8
 *.p12
 *.key

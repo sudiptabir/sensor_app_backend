@@ -24,6 +24,7 @@ export default function Dashboard() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [loggingOut, setLoggingOut] = useState(false);
+  const [isUserLoggedIn, setIsUserLoggedIn] = useState(!!auth.currentUser);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [mlAlerts, setMLAlerts] = useState<MLAlert[]>([]);
   const [devices, setDevices] = useState<any[]>([]);
@@ -73,11 +74,39 @@ export default function Dashboard() {
   // Track which alerts have already been notified
   const shownNotificationsRef = useRef<Set<string>>(new Set());
 
-  // Polling interval ref for devices
+  // Polling interval refs
+  const mlAlertsPollingRef = useRef<NodeJS.Timeout | null>(null);
   const devicesPollingRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Polling interval ref for ML alerts
-  const mlAlertsPollingRef = useRef<NodeJS.Timeout | null>(null);
+  // ✅ NEW: Monitor auth state changes and control polling
+  useEffect(() => {
+    console.log("[Dashboard] Setting up auth state listener");
+    
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        console.log("[Dashboard] ✅ User authenticated:", currentUser.uid);
+        setIsUserLoggedIn(true);
+        // User is logged in - polling will be handled by the separate polling effect
+      } else {
+        console.log("[Dashboard] 🚫 User logged out, stopping all polling...");
+        setIsUserLoggedIn(false);
+        // Stop ML alerts polling
+        if (mlAlertsPollingRef.current) {
+          clearInterval(mlAlertsPollingRef.current);
+          mlAlertsPollingRef.current = null;
+        }
+        // Stop devices polling
+        if (devicesPollingRef.current) {
+          clearInterval(devicesPollingRef.current);
+          devicesPollingRef.current = null;
+        }
+      }
+    });
+
+    return () => {
+      unsubscribeAuth();
+    };
+  }, []);
 
   // Listen to alerts real-time
   useEffect(() => {
@@ -97,8 +126,20 @@ export default function Dashboard() {
     const pollMLAlerts = async () => {
       try {
         const currentUser = auth.currentUser;
+        
+        // STOP polling if user is not authenticated
+        if (!currentUser) {
+          console.log("[Dashboard] 🚫 User not authenticated, skipping ML alerts poll");
+          // Clear the polling interval if it exists
+          if (mlAlertsPollingRef.current) {
+            clearInterval(mlAlertsPollingRef.current);
+            mlAlertsPollingRef.current = null;
+          }
+          return;
+        }
+        
         console.log("[Dashboard] Starting ML alerts poll...");
-        console.log("[Dashboard] Current user ID:", currentUser?.uid);
+        console.log("[Dashboard] Current user ID:", currentUser.uid);
         
         // Debug: Check what's actually in Firestore
         await debugCheckAlertsCollections();
@@ -113,7 +154,7 @@ export default function Dashboard() {
           console.log("[Dashboard] First alert ratingAccuracy:", alerts[0].ratingAccuracy);
         } else {
           console.warn("[Dashboard] No alerts found from getUserMLAlerts");
-          console.warn("[Dashboard] Expected alerts in: users/" + currentUser?.uid + "/mlAlerts");
+          console.warn("[Dashboard] Expected alerts in: users/" + currentUser.uid + "/mlAlerts");
         }
         setMLAlerts(alerts);
         setLoading(false);
@@ -154,21 +195,46 @@ export default function Dashboard() {
           }
         });
       } catch (error) {
+        // If user is not logged in, this is expected - don't log as error
+        if (!auth.currentUser || !isUserLoggedIn) {
+          console.log("[Dashboard] Poll attempted after logout - stopping polling");
+          if (mlAlertsPollingRef.current) {
+            clearInterval(mlAlertsPollingRef.current);
+            mlAlertsPollingRef.current = null;
+          }
+          setLoading(false);
+          setMLAlerts([]);
+          return;
+        }
+        
         console.error("[Dashboard] Error polling ML alerts:", error);
+        // If auth error, stop polling immediately
+        if (error instanceof Error && error.message.includes("not authenticated")) {
+          console.log("[Dashboard] Auth error detected - stopping polling");
+          if (mlAlertsPollingRef.current) {
+            clearInterval(mlAlertsPollingRef.current);
+            mlAlertsPollingRef.current = null;
+          }
+        }
         // Still try to set loading to false so UI doesn't show spinner forever
         setLoading(false);
         setMLAlerts([]);
       }
     };
 
-    // Poll every 5 seconds for ML alerts
-    pollMLAlerts();
-    mlAlertsPollingRef.current = setInterval(pollMLAlerts, 5000);
+    // Poll every 5 seconds for ML alerts (only if user is authenticated)
+    const currentUser = auth.currentUser;
+    if (currentUser && isUserLoggedIn) {
+      pollMLAlerts();
+      mlAlertsPollingRef.current = setInterval(pollMLAlerts, 5000);
+    } else {
+      console.log("[Dashboard] User not authenticated, skipping alert polling setup");
+    }
 
     return () => {
       if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
     };
-  }, []);
+  }, [isUserLoggedIn]);
 
   // Setup notification tap handler to navigate to alert details
   useEffect(() => {
@@ -205,18 +271,26 @@ export default function Dashboard() {
     // Initial fetch
     const pollDevices = async () => {
       try {
+        const currentUser = auth.currentUser;
+        if (!currentUser) {
+          console.log("[Dashboard] User not authenticated - skipping device poll");
+          setDevices([]);
+          setLoading(false);
+          return;
+        }
+
         const db = getFirestore();
-        const devicesRef = collection(db, "devices");
-        const snapshot = await getDocs(devicesRef);
-        
-        const allDevices = snapshot.docs.map((doc) => {
+        const devicesQuery = query(
+          collection(db, "devices"),
+          where("userId", "==", currentUser.uid)
+        );
+        const snapshot = await getDocs(devicesQuery);
+
+        const userDevices = snapshot.docs.map((doc) => {
           const data = doc.data();
           return { id: doc.id, ...data };
         });
-        
-        // Filter for current user
-        const userDevices = allDevices.filter(d => d.userId === auth.currentUser?.uid);
-        
+
         console.log("[Dashboard] Polling: Found", userDevices.length, "devices for user");
         setDevices(userDevices);
         setLoading(false);
@@ -252,41 +326,15 @@ export default function Dashboard() {
     };
 
     // Poll every 15 seconds (was 5s, causing rate limit)
-    pollDevices();
-    devicesPollingRef.current = setInterval(pollDevices, 15000);
+    if (isUserLoggedIn) {
+      pollDevices();
+      devicesPollingRef.current = setInterval(pollDevices, 15000);
+    }
 
     return () => {
       if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
     };
-  }, [readingsUnsubscribes]);
-
-  // Cleanup listeners when user logs out
-  useEffect(() => {
-    const unsubscribeAuth = auth.onAuthStateChanged((user) => {
-      if (!user) {
-        // User logged out - cleanup all listeners
-        console.log("[Dashboard] Auth state changed to null - cleaning up listeners");
-        if (unsubscribeAlerts) {
-          if (typeof unsubscribeAlerts === 'function') unsubscribeAlerts();
-          setUnsubscribeAlerts(null);
-        }
-        // ML alerts now uses polling, not listener
-        setUnsubscribeMLAlerts(null);
-        
-        if (unsubscribeDevices) {
-          if (typeof unsubscribeDevices === 'function') unsubscribeDevices();
-          setUnsubscribeDevices(null);
-        }
-        if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
-        if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
-        readingsUnsubscribes.forEach((unsub) => {
-          if (typeof unsub === 'function') unsub();
-        });
-        setReadingsUnsubscribes([]);
-      }
-    });
-    return unsubscribeAuth;
-  }, [unsubscribeAlerts, unsubscribeMLAlerts, unsubscribeDevices, readingsUnsubscribes]);
+  }, [readingsUnsubscribes, isUserLoggedIn]);
 
   // Initialize push notifications
   useEffect(() => {

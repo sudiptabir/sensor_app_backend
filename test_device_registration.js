@@ -42,10 +42,12 @@ async function runTest() {
     
     const deviceInfo = {
       deviceId: deviceId,
+      label: hostname,
       name: hostname,
       platform: platform,
       version: version,
       status: 'connected',
+      userId: null,
       registeredAt: admin.firestore.Timestamp.now(),
       lastSeen: admin.firestore.Timestamp.now(),
       type: 'sensor_device',

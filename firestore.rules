@@ -1,9 +1,67 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Open rules for development/testing
-    match /{document=**} {
-      allow read, write;
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isDeviceOwner(deviceId) {
+      return get(/databases/$(database)/documents/devices/$(deviceId)).data.userId == request.auth.uid;
+    }
+
+    // Devices collection
+    match /devices/{deviceId} {
+      // Users can read owned devices and unassigned devices (for claim flow).
+      allow read: if isSignedIn() &&
+        (resource.data.userId == request.auth.uid || resource.data.userId == null);
+
+      // Client-created devices must belong to the authenticated user.
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+
+      // Allow owner updates and unclaim; allow claiming an unassigned device.
+      allow update: if isSignedIn() && (
+        (
+          resource.data.userId == request.auth.uid &&
+          (request.resource.data.userId == request.auth.uid || request.resource.data.userId == null)
+        ) ||
+        (
+          resource.data.userId == null &&
+          request.resource.data.userId == request.auth.uid
+        )
+      );
+
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      // Device readings
+      match /readings/{readingId} {
+        allow read, write: if isSignedIn() && isDeviceOwner(deviceId);
+      }
+
+      // Device alerts
+      match /alerts/{alertId} {
+        allow read, write: if isSignedIn() && isDeviceOwner(deviceId);
+      }
+    }
+
+    // User profile documents
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+
+      // User-level ML alerts
+      match /mlAlerts/{alertId} {
+        allow read, update, delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    // Optional sensors collection support
+    match /sensors/{sensorId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      match /readings/{readingId} {
+        allow read, write: if isSignedIn();
+      }
     }
   }
 }
