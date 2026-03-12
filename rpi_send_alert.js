@@ -11,12 +11,14 @@ const http = require('http');
 const https = require('https');
 
 // Configuration
+const EC2_HOST = process.env.EC2_HOST || '13.205.201.82';
+
 const ALERT_API_URL =
   process.env.ALERT_API_URL ||
   process.env.RAILWAY_API_URL ||
-  "https://alert-api-production-dc04.up.railway.app/api/alerts";
+  `http://${EC2_HOST}/alert-api/api/alerts`;
 
-const ADMIN_PORTAL_URL = process.env.ADMIN_PORTAL_URL || 'http://localhost:4000';
+const ADMIN_PORTAL_URL = process.env.ADMIN_PORTAL_URL || `http://${EC2_HOST}`;
 const API_KEY = process.env.API_KEY || process.env.ADMIN_API_KEY || 'test-api-key-123';
 const CHECK_ACCESS_BEFORE_SEND = (process.env.CHECK_ACCESS_BEFORE_SEND || 'true').toLowerCase() !== 'false';
 const DEVICE_ID_FILE = path.join(__dirname, 'device_id.txt');
