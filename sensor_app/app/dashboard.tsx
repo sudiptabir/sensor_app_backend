@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Modal, Linking, Image } from "react-native";
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Modal, Linking, Image, TextInput } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { signOut, onAuthStateChanged } from "firebase/auth";
 import { auth } from "../firebase/firebaseConfig";
@@ -72,6 +72,10 @@ export default function Dashboard() {
   const [deviceSensors, setDeviceSensors] = useState<any[]>([]);
   const [selectedSensor, setSelectedSensor] = useState<any | null>(null);
   const [loadingSensors, setLoadingSensors] = useState(false);
+  const [newSensorLabel, setNewSensorLabel] = useState('');
+  const [newSensorPin, setNewSensorPin] = useState('');
+  const [addingSensor, setAddingSensor] = useState(false);
+  const [deletingSensorId, setDeletingSensorId] = useState<number | null>(null);
   const sensorControlBaseUrl = (process.env.EXPO_PUBLIC_SENSOR_CONTROL_URL || process.env.EXPO_PUBLIC_ADMIN_PORTAL_URL || 'http://13.205.201.82').replace(/\/$/, '');
   const sensorControlApiUrl = `${sensorControlBaseUrl}/sensor-api`;
   const cameraApiUrl = `${sensorControlBaseUrl}/camera-api`;
@@ -744,6 +748,36 @@ export default function Dashboard() {
     }
   };
 
+  // Open browser with WebRTC live stream for device
+  const openBrowserWebRTC = async (device: any) => {
+    const deviceId = device?.id || device?.deviceId || device?.device_id;
+    const userId = auth.currentUser?.uid || '';
+
+    if (!deviceId) {
+      showStyledAlert('Error', 'Device ID is missing.', 'error');
+      return;
+    }
+
+    if (!userId) {
+      showStyledAlert('Error', 'You must be signed in to stream video.', 'error');
+      return;
+    }
+
+    const webrtcUrl = `${cameraApiUrl}/api/camera/${encodeURIComponent(deviceId)}/webrtc?userId=${encodeURIComponent(userId)}&apiKey=${encodeURIComponent(appApiKey)}`;
+
+    try {
+      const supported = await Linking.canOpenURL(webrtcUrl);
+      if (!supported) {
+        showStyledAlert('Error', 'Cannot open browser on this device.', 'error');
+        return;
+      }
+      await Linking.openURL(webrtcUrl);
+    } catch (error) {
+      console.error('[Dashboard] Error opening WebRTC browser stream:', error);
+      showStyledAlert('Error', 'Failed to open browser for video streaming.', 'error');
+    }
+  };
+
   // Fetch sensors for a device
   const fetchDeviceSensors = async (deviceId: string) => {
     try {
@@ -827,6 +861,139 @@ export default function Dashboard() {
       console.error('[Dashboard] Error toggling sensor:', error);
       showStyledAlert('Error', 'Failed to update sensor state', 'error');
     }
+  };
+
+  const addSensorToDevice = async () => {
+    try {
+      const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
+      const userId = auth.currentUser?.uid;
+      const deviceId = selectedDeviceForSensorControl?.id || selectedDeviceForSensorControl?.device_id;
+      const sensorName = newSensorLabel.trim();
+      const pinNumber = Number(newSensorPin);
+
+      if (!deviceId) {
+        showStyledAlert('Error', 'Device ID is missing.', 'error');
+        return;
+      }
+
+      if (!sensorName) {
+        showStyledAlert('Validation Error', 'Please enter sensor label.', 'error');
+        return;
+      }
+
+      if (!Number.isInteger(pinNumber) || pinNumber < 1 || pinNumber > 40) {
+        showStyledAlert('Validation Error', 'Pin number must be between 1 and 40.', 'error');
+        return;
+      }
+
+      setAddingSensor(true);
+
+      const response = await fetch(`${sensorControlApiUrl}/api/sensors`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY || '',
+          'x-user-id': userId || '',
+        },
+        body: JSON.stringify({
+          deviceId,
+          sensorName,
+          pinNumber,
+          sensorType: 'gpio',
+        }),
+      });
+
+      const responseData = await response.json().catch(() => ({}));
+
+      if (response.ok) {
+        setNewSensorLabel('');
+        setNewSensorPin('');
+        await fetchDeviceSensors(deviceId);
+        showStyledAlert('Success', `${sensorName} added on pin ${pinNumber}`, 'success');
+        return;
+      }
+
+      if (response.status === 409) {
+        showStyledAlert('Pin Already Used', responseData.reason || 'Pin number is already assigned.', 'warning');
+        return;
+      }
+
+      showStyledAlert('Error', responseData.reason || responseData.error || 'Failed to add sensor', 'error');
+    } catch (error) {
+      console.error('[Dashboard] Error adding sensor:', error);
+      showStyledAlert('Error', 'Failed to add sensor', 'error');
+    } finally {
+      setAddingSensor(false);
+    }
+  };
+
+  const deleteSensorFromDevice = (sensor: any) => {
+    if (!sensor?.sensor_id) {
+      showStyledAlert('Error', 'Invalid sensor selected.', 'error');
+      return;
+    }
+
+    showStyledAlert(
+      'Delete Sensor',
+      `Are you sure you want to delete "${sensor.sensor_name}"?`,
+      'question',
+      [
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setStyledAlertVisible(false);
+            try {
+              const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
+              const userId = auth.currentUser?.uid;
+              const deviceId = selectedDeviceForSensorControl?.id || selectedDeviceForSensorControl?.device_id;
+
+              setDeletingSensorId(sensor.sensor_id);
+
+              const response = await fetch(
+                `${sensorControlApiUrl}/api/sensors/${sensor.sensor_id}`,
+                {
+                  method: 'DELETE',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': API_KEY || '',
+                    'x-user-id': userId || '',
+                  },
+                }
+              );
+
+              const responseData = await response.json().catch(() => ({}));
+
+              if (response.ok) {
+                setDeviceSensors((prev) => prev.filter((s) => s.sensor_id !== sensor.sensor_id));
+                setSelectedSensor(null);
+
+                if (deviceId) {
+                  await fetchDeviceSensors(deviceId);
+                }
+
+                showStyledAlert('Deleted', `${sensor.sensor_name} removed successfully`, 'success');
+                return;
+              }
+
+              showStyledAlert(
+                'Error',
+                responseData.reason || responseData.error || 'Failed to delete sensor',
+                'error'
+              );
+            } catch (error) {
+              console.error('[Dashboard] Error deleting sensor:', error);
+              showStyledAlert('Error', 'Failed to delete sensor', 'error');
+            } finally {
+              setDeletingSensorId(null);
+            }
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      undefined,
+      'stacked'
+    );
   };
 
   // Load alert retention setting
@@ -1116,6 +1283,9 @@ export default function Dashboard() {
                           style={[styles.actionBtn, styles.sensorBtn]}
                           onPress={() => {
                             setSelectedDeviceForSensorControl(item);
+                            setSelectedSensor(null);
+                            setNewSensorLabel('');
+                            setNewSensorPin('');
                             setShowSensorControlModal(true);
                             fetchDeviceSensors(item.id);
                           }}
@@ -1129,6 +1299,15 @@ export default function Dashboard() {
                         >
                           <MaterialIcons name="videocam" size={20} />
                           <Text style={styles.actionBtnLabel}>Camera</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={styles.actionRow}>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.webrtcBtn]}
+                          onPress={() => openBrowserWebRTC(item)}
+                        >
+                          <MaterialIcons name="open-in-browser" size={20} />
+                          <Text style={styles.actionBtnLabel}>Open Browser for Video Streaming</Text>
                         </TouchableOpacity>
                       </View>
                       <View style={styles.actionRow}>
@@ -1960,7 +2139,12 @@ export default function Dashboard() {
         visible={showSensorControlModal}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowSensorControlModal(false)}
+        onRequestClose={() => {
+          setShowSensorControlModal(false);
+          setSelectedSensor(null);
+          setNewSensorLabel('');
+          setNewSensorPin('');
+        }}
       >
         <View style={styles.modalOverlay}>
           <View
@@ -1977,80 +2161,137 @@ export default function Dashboard() {
 
             {loadingSensors ? (
               <ActivityIndicator size="large" style={{ marginVertical: 20 }} />
-            ) : deviceSensors.length === 0 ? (
-              <Text style={styles.emptyText}>No sensors found</Text>
-            ) : selectedSensor ? (
-              // Sensor Detail View
-              <View style={styles.sensorDetailContainer}>
-                <TouchableOpacity
-                  onPress={() => setSelectedSensor(null)}
-                  style={styles.backButton}
-                >
-                  <MaterialIcons name="arrow-back" size={24} color="#7C3AED" />
-                  <Text style={styles.backButtonText}>Back</Text>
-                </TouchableOpacity>
+            ) : (
+              <>
+                {!selectedSensor && (
+                  <View style={styles.addSensorCard}>
+                    <Text style={styles.addSensorTitle}>Add New Sensor</Text>
+                    <View style={styles.addSensorInputRow}>
+                      <TextInput
+                        placeholder="Sensor label"
+                        value={newSensorLabel}
+                        onChangeText={setNewSensorLabel}
+                        style={styles.addSensorInput}
+                        placeholderTextColor="#94A3B8"
+                      />
+                      <TextInput
+                        placeholder="Pin"
+                        value={newSensorPin}
+                        onChangeText={setNewSensorPin}
+                        style={[styles.addSensorInput, styles.addSensorPinInput]}
+                        placeholderTextColor="#94A3B8"
+                        keyboardType="number-pad"
+                        maxLength={2}
+                      />
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.addSensorButton, addingSensor && styles.addSensorButtonDisabled]}
+                      onPress={addSensorToDevice}
+                      disabled={addingSensor}
+                    >
+                      {addingSensor ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <Text style={styles.addSensorButtonText}>Add Sensor</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                )}
 
-                <View style={styles.sensorDetailCard}>
-                  <Text style={styles.sensorDetailName}>{selectedSensor.sensor_name}</Text>
-                  <Text style={styles.sensorDetailType}>{selectedSensor.sensor_type}</Text>
-                  
-                  <View style={styles.sensorStateContainer}>
-                    <Text style={styles.stateLabel}>Status:</Text>
-                    <View style={[
-                      styles.stateBadge,
-                      selectedSensor.enabled ? styles.enabledBadge : styles.disabledBadge
-                    ]}>
-                      <Text style={styles.stateBadgeText}>
-                        {selectedSensor.enabled ? '🟢 Enabled' : '🔴 Disabled'}
-                      </Text>
+                {selectedSensor ? (
+                  <View style={styles.sensorDetailContainer}>
+                    <TouchableOpacity
+                      onPress={() => setSelectedSensor(null)}
+                      style={styles.backButton}
+                    >
+                      <MaterialIcons name="arrow-back" size={24} color="#7C3AED" />
+                      <Text style={styles.backButtonText}>Back</Text>
+                    </TouchableOpacity>
+
+                    <View style={styles.sensorDetailCard}>
+                      <Text style={styles.sensorDetailName}>{selectedSensor.sensor_name}</Text>
+                      <Text style={styles.sensorDetailType}>{selectedSensor.sensor_type}</Text>
+                      <Text style={styles.sensorDetailPin}>Pin: {selectedSensor.pin_number ?? 'Not assigned'}</Text>
+
+                      <View style={styles.sensorStateContainer}>
+                        <Text style={styles.stateLabel}>Status:</Text>
+                        <View style={[
+                          styles.stateBadge,
+                          selectedSensor.enabled ? styles.enabledBadge : styles.disabledBadge
+                        ]}>
+                          <Text style={styles.stateBadgeText}>
+                            {selectedSensor.enabled ? '🟢 Enabled' : '🔴 Disabled'}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.toggleButton,
+                          selectedSensor.enabled ? styles.disableButton : styles.enableButton
+                        ]}
+                        onPress={() => toggleSensorState(selectedSensor)}
+                      >
+                        <MaterialIcons
+                          name={selectedSensor.enabled ? "toggle-on" : "toggle-off"}
+                          size={24}
+                          color="#fff"
+                        />
+                        <Text style={styles.toggleButtonText}>
+                          {selectedSensor.enabled ? 'Turn Off' : 'Turn On'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.deleteSensorButton,
+                          deletingSensorId === selectedSensor.sensor_id && styles.deleteSensorButtonDisabled,
+                        ]}
+                        onPress={() => deleteSensorFromDevice(selectedSensor)}
+                        disabled={deletingSensorId === selectedSensor.sensor_id}
+                      >
+                        {deletingSensorId === selectedSensor.sensor_id ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <>
+                            <MaterialIcons name="delete-outline" size={22} color="#fff" />
+                            <Text style={styles.deleteSensorButtonText}>Delete Sensor</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
                     </View>
                   </View>
-
-                  <TouchableOpacity
-                    style={[
-                      styles.toggleButton,
-                      selectedSensor.enabled ? styles.disableButton : styles.enableButton
-                    ]}
-                    onPress={() => toggleSensorState(selectedSensor)}
-                  >
-                    <MaterialIcons
-                      name={selectedSensor.enabled ? "toggle-on" : "toggle-off"}
-                      size={24}
-                      color="#fff"
-                    />
-                    <Text style={styles.toggleButtonText}>
-                      {selectedSensor.enabled ? 'Turn Off' : 'Turn On'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : (
-              // Sensors List View
-              <FlatList
-                data={deviceSensors}
-                scrollEnabled={true}
-                keyExtractor={(item) => item.sensor_id}
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={styles.sensorListItem}
-                    onPress={() => setSelectedSensor(item)}
-                  >
-                    <View style={styles.sensorListItemContent}>
-                      <Text style={styles.sensorListItemName}>{item.sensor_name}</Text>
-                      <Text style={styles.sensorListItemType}>{item.sensor_type}</Text>
-                    </View>
-                    <View style={[
-                      styles.sensorListItemBadge,
-                      item.enabled ? styles.enabledBadge : styles.disabledBadge
-                    ]}>
-                      <Text style={styles.sensorListItemBadgeText}>
-                        {item.enabled ? '🟢' : '🔴'}
-                      </Text>
-                    </View>
-                    <MaterialIcons name="chevron-right" size={24} color="#999" />
-                  </TouchableOpacity>
+                ) : deviceSensors.length === 0 ? (
+                  <Text style={styles.emptyText}>No sensors found. Add one to start controlling sensors.</Text>
+                ) : (
+                  <FlatList
+                    data={deviceSensors}
+                    scrollEnabled={true}
+                    keyExtractor={(item) => item.sensor_id}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity
+                        style={styles.sensorListItem}
+                        onPress={() => setSelectedSensor(item)}
+                      >
+                        <View style={styles.sensorListItemContent}>
+                          <Text style={styles.sensorListItemName}>{item.sensor_name}</Text>
+                          <Text style={styles.sensorListItemType}>{item.sensor_type}</Text>
+                          <Text style={styles.sensorListItemPin}>Pin: {item.pin_number ?? 'N/A'}</Text>
+                        </View>
+                        <View style={[
+                          styles.sensorListItemBadge,
+                          item.enabled ? styles.enabledBadge : styles.disabledBadge
+                        ]}>
+                          <Text style={styles.sensorListItemBadgeText}>
+                            {item.enabled ? '🟢' : '🔴'}
+                          </Text>
+                        </View>
+                        <MaterialIcons name="chevron-right" size={24} color="#999" />
+                      </TouchableOpacity>
+                    )}
+                  />
                 )}
-              />
+              </>
             )}
 
             <TouchableOpacity
@@ -2058,7 +2299,12 @@ export default function Dashboard() {
                 styles.sensorControlCloseButton,
                 { marginBottom: Math.max(insets.bottom, 12) },
               ]}
-              onPress={() => setShowSensorControlModal(false)}
+              onPress={() => {
+                setShowSensorControlModal(false);
+                setSelectedSensor(null);
+                setNewSensorLabel('');
+                setNewSensorPin('');
+              }}
               activeOpacity={0.85}
             >
               <MaterialIcons name="close" size={18} color="#FFFFFF" />
@@ -2217,6 +2463,10 @@ const styles = StyleSheet.create({
   renameBtn: {
     backgroundColor: "#FFF3E0",
     borderColor: "#FB8C00",
+  },
+  webrtcBtn: {
+    backgroundColor: "#E8F5E9",
+    borderColor: "#4CAF50",
   },
   actionBtnText: {
     fontSize: 24,
@@ -3348,6 +3598,11 @@ const styles = StyleSheet.create({
   sensorDetailType: {
     fontSize: 14,
     color: '#666',
+    marginBottom: 6,
+  },
+  sensorDetailPin: {
+    fontSize: 13,
+    color: '#64748B',
     marginBottom: 20,
   },
   sensorStateContainer: {
@@ -3399,6 +3654,25 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 8,
   },
+  deleteSensorButton: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    backgroundColor: '#B91C1C',
+  },
+  deleteSensorButtonDisabled: {
+    opacity: 0.7,
+  },
+  deleteSensorButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
   sensorListItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3420,6 +3694,60 @@ const styles = StyleSheet.create({
   sensorListItemType: {
     fontSize: 12,
     color: '#999',
+  },
+  sensorListItemPin: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  addSensorCard: {
+    backgroundColor: '#EEF2FF',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  addSensorTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#3730A3',
+    marginBottom: 10,
+  },
+  addSensorInputRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+  },
+  addSensorInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: '#0F172A',
+  },
+  addSensorPinInput: {
+    maxWidth: 92,
+    textAlign: 'center',
+  },
+  addSensorButton: {
+    backgroundColor: '#4F46E5',
+    borderRadius: 10,
+    paddingVertical: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addSensorButtonDisabled: {
+    opacity: 0.7,
+  },
+  addSensorButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
   sensorListItemBadge: {
     width: 40,
