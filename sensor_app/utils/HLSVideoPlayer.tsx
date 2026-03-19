@@ -147,12 +147,18 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   closeButton: {
-    padding: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   closeButtonText: {
-    fontSize: 24,
+    fontSize: 20,
     color: '#fff',
     fontWeight: 'bold',
+    lineHeight: 22,
   },
   videoContainer: {
     flex: 1,

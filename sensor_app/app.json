@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "sensor_app",
-    "slug": "sensor_app",
+    "name": "RuTAG-HACS",
+    "slug": "rutag-hacs",
     "owner": "sudiptabir777",
     "version": "1.0.0",
     "orientation": "portrait",

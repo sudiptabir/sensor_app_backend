@@ -10,6 +10,8 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 
+require('dotenv').config();
+
 // Configuration
 const EC2_HOST = process.env.EC2_HOST || '13.205.201.82';
 
@@ -19,12 +21,13 @@ const ALERT_API_URL =
   `http://${EC2_HOST}/alert-api/api/alerts`;
 
 const ADMIN_PORTAL_URL = process.env.ADMIN_PORTAL_URL || `http://${EC2_HOST}`;
-const API_KEY = process.env.API_KEY || process.env.ADMIN_API_KEY || 'test-api-key-123';
-const CHECK_ACCESS_BEFORE_SEND = (process.env.CHECK_ACCESS_BEFORE_SEND || 'true').toLowerCase() !== 'false';
-const DEVICE_ID_FILE = path.join(__dirname, 'device_id.txt');
+const API_KEY = process.env.API_KEY || process.env.ADMIN_API_KEY || '';
+const CHECK_ACCESS_BEFORE_SEND = (process.env.CHECK_ACCESS_BEFORE_SEND || 'false').toLowerCase() === 'true';
+const configuredDeviceIdFile = process.env.DEVICE_ID_FILE || './device_id.txt';
+const DEVICE_ID_FILE = path.isAbsolute(configuredDeviceIdFile)
+  ? configuredDeviceIdFile
+  : path.resolve(process.cwd(), configuredDeviceIdFile);
 const DEVICE_NAME = "raspberrypi";
-// ⚠️  IMPORTANT: Replace with your Firebase user ID (the admin/test user)
-const USER_ID = process.env.ALERT_USER_ID || "GKu2p6uvarhEzrKG85D7fXbxUh23";
 
 /**
  * Read device ID from file
@@ -32,20 +35,20 @@ const USER_ID = process.env.ALERT_USER_ID || "GKu2p6uvarhEzrKG85D7fXbxUh23";
 function readDeviceId() {
   try {
     if (!fs.existsSync(DEVICE_ID_FILE)) {
-      console.error(`❌ Error: device_id.txt not found at ${DEVICE_ID_FILE}`);
+      console.error(`❌ Error: device ID file not found at ${DEVICE_ID_FILE}`);
       process.exit(1);
     }
     
     const deviceId = fs.readFileSync(DEVICE_ID_FILE, 'utf8').trim();
     
     if (!deviceId) {
-      console.error('❌ Error: device_id.txt is empty');
+      console.error('❌ Error: device ID file is empty');
       process.exit(1);
     }
     
     return deviceId;
   } catch (error) {
-    console.error('❌ Error reading device_id.txt:', error.message);
+    console.error('❌ Error reading device ID file:', error.message);
     process.exit(1);
   }
 }
@@ -109,10 +112,10 @@ function sendRequest(url, data, method = 'POST', extraHeaders = {}) {
 }
 
 /**
- * Check whether user has access to the device via Admin Portal.
+ * Check whether the device is allowed to send alerts via Admin Portal.
  */
-async function checkDeviceAccess(userId, deviceId) {
-  const url = `${ADMIN_PORTAL_URL}/api/check-access/${encodeURIComponent(userId)}/${encodeURIComponent(deviceId)}`;
+async function checkDeviceStatus(deviceId) {
+  const url = `${ADMIN_PORTAL_URL}/api/check-device/${encodeURIComponent(deviceId)}`;
 
   try {
     const response = await sendRequest(url, null, 'GET', {
@@ -130,15 +133,15 @@ async function checkDeviceAccess(userId, deviceId) {
     return {
       reachable: true,
       hasAccess: response.data.hasAccess !== false,
-      accessLevel: response.data.accessLevel || 'default',
+      registered: response.data.registered !== false,
       reason: response.data.reason || null,
-      details: response.data.details || null,
+      device: response.data.device || null,
     };
   } catch (error) {
     return {
       reachable: false,
       hasAccess: true,
-      reason: `Admin portal check failed: ${error.message}`,
+      reason: `Admin portal device check failed: ${error.message}`,
     };
   }
 }
@@ -148,8 +151,7 @@ async function checkDeviceAccess(userId, deviceId) {
  */
 async function sendAlert(deviceId, riskLevel = "Medium", description = "Test alert from Raspberry Pi") {
   const alertPayload = {
-    userId: USER_ID,        // ← REQUIRED: Firebase user ID
-    deviceId: deviceId,     // ← REQUIRED: Device identifier
+    deviceId: deviceId,
     alert: {
       notification_type: "Alert",
       detected_objects: ["test", "detection"],
@@ -221,35 +223,39 @@ async function testHealth() {
  */
 async function main() {
   const deviceId = readDeviceId();
+  const shouldRunAccessPrecheck = CHECK_ACCESS_BEFORE_SEND && !!API_KEY;
 
   console.log("=".repeat(60));
   console.log("🚨 Raspberry Pi Alert Sender (Node.js)");
   console.log("=".repeat(60));
   console.log(`Device: ${DEVICE_NAME}`);
   console.log(`Device ID: ${deviceId}`);
-  console.log(`User ID: ${USER_ID}`);
+  console.log(`Device ID File: ${DEVICE_ID_FILE}`);
   console.log(`Alert API URL: ${ALERT_API_URL}`);
   console.log(`Admin Portal URL: ${ADMIN_PORTAL_URL}`);
-  console.log(`Access precheck: ${CHECK_ACCESS_BEFORE_SEND ? 'enabled' : 'disabled'}`);
+  console.log(`Device precheck: ${shouldRunAccessPrecheck ? 'enabled' : 'disabled'}`);
   console.log("=".repeat(60));
   console.log();
 
-  if (CHECK_ACCESS_BEFORE_SEND) {
-    console.log('🔐 Checking user/device access via admin portal...');
-    const access = await checkDeviceAccess(USER_ID, deviceId);
+  if (CHECK_ACCESS_BEFORE_SEND && !API_KEY) {
+    console.warn('⚠️  CHECK_ACCESS_BEFORE_SEND is enabled, but API_KEY/ADMIN_API_KEY is not set.');
+    console.warn('⚠️  Skipping device precheck; alert API will enforce final device restrictions.');
+    console.log();
+  }
+
+  if (shouldRunAccessPrecheck) {
+    console.log('🔐 Checking device status via admin portal...');
+    const access = await checkDeviceStatus(deviceId);
 
     if (!access.reachable) {
       console.warn(`⚠️  ${access.reason}`);
-      console.warn('⚠️  Continuing in fail-open mode; alert API will do final block checks.');
+      console.warn('⚠️  Continuing in fail-open mode; alert API will do final device checks.');
     } else if (!access.hasAccess) {
-      console.error('🚫 Access denied by admin portal. Alerts will not be sent.');
+      console.error('🚫 Device is not allowed to send alerts.');
       console.error(`   Reason: ${access.reason || 'No access'}`);
-      if (access.details) {
-        console.error(`   Details: ${access.details}`);
-      }
       process.exit(1);
     } else {
-      console.log(`✅ Access granted (level: ${access.accessLevel || 'default'})`);
+      console.log('✅ Device is allowed to send alerts');
     }
 
     console.log();

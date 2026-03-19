@@ -12,12 +12,14 @@ const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
 
+require('dotenv').config();
+
 // Initialize Firebase Admin
 const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './serviceAccountKey.json';
 try {
   admin.initializeApp({
     credential: admin.credential.cert(require(serviceAccountPath)),
-    databaseURL: process.env.FIREBASE_REALTIME_DB || 'https://sensor-app-2a69b-default-rtdb.firebaseio.com'
+    databaseURL: process.env.FIREBASE_REALTIME_DB || 'https://rutag-app-default-rtdb.asia-southeast1.firebasedatabase.app'
   });
   console.log('✅ Firebase initialized');
 } catch (err) {
@@ -30,21 +32,31 @@ const firestore = admin.firestore();
 
 // Get device ID - try multiple sources
 function getDeviceID() {
-  // 1. Try device_id.txt file (most reliable for registered devices)
+  // 1. Explicit DEVICE_ID from env (highest priority)
+  if (process.env.DEVICE_ID && String(process.env.DEVICE_ID).trim()) {
+    console.log('📋 Device ID loaded from DEVICE_ID env');
+    return String(process.env.DEVICE_ID).trim();
+  }
+
+  // 2. Try configured device ID file. Default to script directory.
   try {
-    const deviceIdPath = path.join(__dirname, 'device_id.txt');
+    const configuredPath = process.env.DEVICE_ID_FILE;
+    const deviceIdPath = configuredPath
+      ? (path.isAbsolute(configuredPath) ? configuredPath : path.resolve(process.cwd(), configuredPath))
+      : path.join(__dirname, 'device_id.txt');
+
     if (fs.existsSync(deviceIdPath)) {
       const deviceId = fs.readFileSync(deviceIdPath, 'utf8').trim();
       if (deviceId) {
-        console.log('📋 Device ID loaded from device_id.txt');
+        console.log(`📋 Device ID loaded from ${deviceIdPath}`);
         return deviceId;
       }
     }
   } catch (err) {
-    console.warn('⚠️  Could not read device_id.txt:', err.message);
+    console.warn('⚠️  Could not read device ID file:', err.message);
   }
 
-  // 2. Fallback to hostname (for backward compatibility)
+  // 3. Fallback to hostname (backward compatibility)
   const hostname = require('os').hostname().toLowerCase().replace(/[^a-z0-9-]/g, '');
   console.log('📋 Using hostname as device ID:', hostname);
   return hostname;
@@ -74,6 +86,76 @@ const HTTP_PORT = process.env.MJPEG_PORT || 8080;
 const LOCAL_IP = getLocalIPAddress();
 const FRAMERATE = 15;
 const QUALITY = 80;
+const CAMERA_CONTROL_API_URL = (process.env.CAMERA_CONTROL_API_URL || 'http://13.205.201.82/camera-api').replace(/\/$/, '');
+const API_KEY = process.env.API_KEY || process.env.ADMIN_API_KEY || '';
+const DEVICE_SECRET = process.env.DEVICE_REGISTRATION_SECRET || '';
+
+// Optional public URLs when Pi is behind NAT. If not set, local IP URLs are used.
+const CAMERA_PUBLIC_STREAM_URL = process.env.CAMERA_PUBLIC_STREAM_URL || '';
+const CAMERA_PUBLIC_FRAME_URL = process.env.CAMERA_PUBLIC_FRAME_URL || '';
+
+function getEffectiveStreamUrl() {
+  if (CAMERA_PUBLIC_STREAM_URL.trim()) {
+    return CAMERA_PUBLIC_STREAM_URL.trim();
+  }
+
+  return `http://${LOCAL_IP}:${HTTP_PORT}/stream.mjpeg`;
+}
+
+function getEffectiveFrameUrl() {
+  if (CAMERA_PUBLIC_FRAME_URL.trim()) {
+    return CAMERA_PUBLIC_FRAME_URL.trim();
+  }
+
+  return `http://${LOCAL_IP}:${HTTP_PORT}/frame.jpg`;
+}
+
+async function registerCameraStreamOnEc2() {
+  if (!API_KEY) {
+    console.warn('⚠️  API_KEY/ADMIN_API_KEY missing; skipping EC2 camera registration');
+    return;
+  }
+
+  if (!DEVICE_SECRET) {
+    console.warn('⚠️  DEVICE_REGISTRATION_SECRET missing; skipping EC2 camera registration');
+    return;
+  }
+
+  const streamUrl = getEffectiveStreamUrl();
+  const frameUrl = getEffectiveFrameUrl();
+
+  try {
+    const response = await fetch(`${CAMERA_CONTROL_API_URL}/api/camera/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'x-device-secret': DEVICE_SECRET,
+      },
+      body: JSON.stringify({
+        deviceId: DEVICE_ID,
+        streamUrl,
+        frameUrl,
+      }),
+    });
+
+    const responseText = await response.text();
+    let responseData = {};
+    try {
+      responseData = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      responseData = { raw: responseText };
+    }
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${responseData.error || responseData.message || responseText || 'Camera registration failed'}`);
+    }
+
+    console.log('✅ Camera stream registered on EC2 camera API');
+  } catch (err) {
+    console.error('❌ Failed to register camera stream on EC2:', err.message);
+  }
+}
 
 console.log(`\n🎥 MJPEG Camera Server`);
 console.log(`━━━━━━━━━━━━━━━━━━━━━━`);
@@ -166,6 +248,29 @@ const server = http.createServer((req, res) => {
 
   // MJPEG stream endpoint (legacy - kept for compatibility)
   if (url.pathname === '/stream.mjpeg' || url.pathname === '/') {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'Content-Type': 'multipart/x-mixed-replace; boundary=BOUNDARY',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD'
+      });
+      res.end();
+      return;
+    }
+
+    if (req.method !== 'GET') {
+      res.writeHead(405, {
+        'Content-Type': 'text/plain',
+        'Allow': 'GET, HEAD',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end('Method Not Allowed');
+      return;
+    }
+
     console.log(`📡 Client connected: ${req.socket.remoteAddress}`);
 
     res.writeHead(200, {
@@ -282,7 +387,7 @@ server.listen(HTTP_PORT, '0.0.0.0', () => {
   // Update both Realtime Database and Firestore
   const streamingData = {
     streaming_enabled: true,
-    streaming_url: `http://${LOCAL_IP}:${HTTP_PORT}/stream.mjpeg`,
+    streaming_url: getEffectiveStreamUrl(),
     streaming_type: 'mjpeg',
     streaming_port: HTTP_PORT,
     ipAddress: LOCAL_IP,
@@ -300,13 +405,15 @@ server.listen(HTTP_PORT, '0.0.0.0', () => {
     ipAddress: LOCAL_IP,
     ip_address: LOCAL_IP,
     streaming_enabled: true,
-    streaming_url: `http://${LOCAL_IP}:${HTTP_PORT}/stream.mjpeg`,
+    streaming_url: getEffectiveStreamUrl(),
     streaming_type: 'mjpeg',
     streaming_port: HTTP_PORT,
     lastSeen: admin.firestore.FieldValue.serverTimestamp()
   })
     .then(() => console.log('✅ Firestore updated with streaming info'))
     .catch(err => console.error('❌ Firestore update error:', err.message));
+
+  registerCameraStreamOnEc2();
 });
 
 server.on('error', (err) => {

@@ -1,0 +1,15 @@
+{
+  "name": "dual-sync-device-registration",
+  "version": "1.0.0",
+  "description": "Register a device through the alert API and Nginx",
+  "main": "test_device_registration_dual_sync.js",
+  "scripts": {
+    "register": "node test_device_registration_dual_sync.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1"
+  }
+}

@@ -1,47 +1,80 @@
 #!/usr/bin/env node
 /**
- * DHT11 Temperature & Humidity Sensor Control Script
- * Runs on Raspberry Pi - Only handles sensor on/off control
- * 
- * ⚠️  IMPORTANT: Blocked User Access Control
- *     - All authorization is handled on the backend API
- *     - The backend checks if a user is blocked BEFORE sending control commands
- *     - This script simply executes commands from authorized requests only
- *     - If a blocked user tries to control this sensor:
- *       1. Mobile app sends request to backend API with user ID
- *       2. Backend checks user_blocks and device_access_control tables
- *       3. If user is blocked, backend returns 403 Forbidden error
- *       4. No command is sent to this Pi script
- *     - Therefore, this script doesn't need additional blocking logic
+ * DHT11 Sensor Control Agent (Raspberry Pi)
+ *
+ * Control-only behavior:
+ * - Registers a controllable sensor row in EC2 PostgreSQL via Sensor Control API.
+ * - Polls desired on/off state from EC2 API.
+ * - Does NOT send sensor readings/data to backend.
  */
 
 const express = require('express');
-const axios = require('axios');
 const os = require('os');
-const Sensor = require('node-dht-sensor').promises;
+const fs = require('fs');
+
+require('dotenv').config();
 
 // ============================================
 // Configuration
 // ============================================
-const BACKEND_URL = 'https://web-production-3d9a.up.railway.app'; // Your Railway backend
-const DEVICE_ID = '3d49c55d-bbfd-4bd0-9663-8728d64743ac'; // Raspberry Pi device ID from admin portal
-const SENSOR_ID = 6; // DHT11 Sensor ID (integer)
-const DHT_PIN = 4; // GPIO4
-const STATUS_CHECK_INTERVAL = 5000; // Check backend status every 5 seconds (in milliseconds)
-const HTTP_PORT = 5000;
+const SENSOR_CONTROL_API_URL = (process.env.SENSOR_CONTROL_API_URL || 'http://13.205.201.82/sensor-api').replace(/\/$/, '');
+const DEVICE_ID_FILE = process.env.DEVICE_ID_FILE || './device_id.txt';
+const DEVICE_ID = (process.env.DEVICE_ID || (fs.existsSync(DEVICE_ID_FILE) ? fs.readFileSync(DEVICE_ID_FILE, 'utf8').trim() : '')).trim();
+const SENSOR_NAME = process.env.SENSOR_NAME || 'DHT11 Sensor';
+const SENSOR_TYPE = process.env.SENSOR_TYPE || 'dht11';
+const API_KEY = process.env.API_KEY || process.env.ADMIN_API_KEY || '';
+const DEVICE_SECRET = process.env.DEVICE_REGISTRATION_SECRET || '';
+const STATUS_CHECK_INTERVAL = Number(process.env.SENSOR_STATUS_CHECK_INTERVAL_MS || 5000);
+const HTTP_PORT = Number(process.env.SENSOR_LOCAL_PORT || 5000);
 
 // ============================================
 // Global State
 // ============================================
 let sensorEnabled = true;
-let dhtSensor = null;
+let sensorId = null;
+
+if (!DEVICE_ID) {
+  console.error('❌ DEVICE_ID is required (set DEVICE_ID or DEVICE_ID_FILE)');
+  process.exit(1);
+}
+
+if (!API_KEY) {
+  console.error('❌ API_KEY (or ADMIN_API_KEY) is required for sensor-control API calls');
+  process.exit(1);
+}
 
 // ============================================
 // Utility Functions
 // ============================================
 
+async function requestJson(path, { method = 'GET', body, extraHeaders = {} } = {}) {
+  const response = await fetch(`${SENSOR_CONTROL_API_URL}${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': API_KEY,
+      ...extraHeaders,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const text = await response.text();
+  let json;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { raw: text };
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${json.error || json.message || text || 'Request failed'}`);
+  }
+
+  return json;
+}
+
 /**
- * Get the local IP address of this Raspberry Pi
+ * Get local IP for diagnostics
  */
 function getLocalIP() {
   try {
@@ -62,145 +95,122 @@ function getLocalIP() {
 }
 
 /**
- * Register this device's IP address with the backend
+ * Register or upsert this Pi's DHT sensor on EC2
  */
-async function registerDeviceIP() {
+async function registerSensor() {
   try {
-    const ipAddress = getLocalIP();
-    if (!ipAddress) {
-      console.warn('⚠️  Could not determine local IP address');
-      return;
-    }
-
-    console.log(`📍 Local IP: ${ipAddress}`);
-
-    const url = `${BACKEND_URL}/api/devices/${DEVICE_ID}/metadata`;
-    const response = await axios.put(url, { ip_address: ipAddress }, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 10000
+    const response = await requestJson('/api/sensors/register', {
+      method: 'POST',
+      body: {
+        deviceId: DEVICE_ID,
+        sensorName: SENSOR_NAME,
+        sensorType: SENSOR_TYPE,
+      },
+      extraHeaders: {
+        'x-device-secret': DEVICE_SECRET,
+      },
     });
 
-    if (response.status === 200 || response.status === 201) {
-      console.log(`✅ Device IP registered: ${ipAddress}`);
+    sensorId = response?.sensor?.sensor_id || null;
+    if (sensorId) {
+      console.log(`✅ Sensor registered on EC2 (sensor_id=${sensorId})`);
     } else {
-      console.warn(`⚠️  Failed to register IP: ${response.status}`);
+      console.warn('⚠️  Sensor registration succeeded but sensor_id missing in response');
     }
   } catch (error) {
-    if (error.response && error.response.status === 404) {
-      console.warn('⚠️  Device not found in backend - skipping IP registration');
-      console.warn('   (This is OK - device will work without IP registration)');
-    } else {
-      console.warn(`⚠️  Error registering IP: ${error.message}`);
-      console.warn('   (This is OK - continuing without IP registration)');
-    }
+    console.error(`❌ Failed to register sensor on EC2: ${error.message}`);
+    throw error;
   }
 }
 
 /**
- * Check if sensor is enabled in backend database
+ * Poll desired sensor state from EC2 backend
  */
 async function checkSensorStatus() {
   try {
-    const response = await axios.get(
-      `${BACKEND_URL}/api/sensors?deviceId=${DEVICE_ID}`,
-      { timeout: 5000 }
-    );
+    const sensors = await requestJson(`/api/sensors?deviceId=${encodeURIComponent(DEVICE_ID)}`);
+    const target = Array.isArray(sensors)
+      ? sensors.find((s) => (sensorId ? s.sensor_id === sensorId : String(s.sensor_name || '').toLowerCase() === SENSOR_NAME.toLowerCase())) || sensors[0]
+      : null;
 
-    if (response.status === 200) {
-      const sensors = response.data;
-      for (const sensor of sensors) {
-        if (sensor.sensor_id === SENSOR_ID) {
-          const backendEnabled = sensor.enabled !== false;
+    if (!target) {
+      console.warn('⚠️  No sensor row found for device yet');
+      return sensorEnabled;
+    }
 
-          // Update local state if changed
-          if (backendEnabled !== sensorEnabled) {
-            sensorEnabled = backendEnabled;
-            const status = sensorEnabled ? 'ON' : 'OFF';
-            console.log(`🔄 Sensor state updated from backend: ${status}`);
-          }
+    if (!sensorId && target.sensor_id) {
+      sensorId = target.sensor_id;
+    }
 
-          return backendEnabled;
-        }
-      }
+    const backendEnabled = target.enabled !== false;
+    if (backendEnabled !== sensorEnabled) {
+      sensorEnabled = backendEnabled;
+      console.log(`🔄 Sensor state changed from EC2 backend: ${sensorEnabled ? 'ON' : 'OFF'}`);
     }
 
     return sensorEnabled;
   } catch (error) {
-    console.warn(`⚠️  Error checking backend status: ${error.message}`);
+    console.warn(`⚠️  Error polling sensor status: ${error.message}`);
     return sensorEnabled;
   }
 }
 
 /**
- * Status monitoring loop - checks backend periodically
+ * Status monitoring loop - polls desired state from EC2
  */
 async function statusMonitorLoop() {
-  console.log(`🔍 Starting status monitor (Device: ${DEVICE_ID}, Sensor: ${SENSOR_ID})`);
+  console.log(`🔍 Starting status monitor (device=${DEVICE_ID}, interval=${STATUS_CHECK_INTERVAL}ms)`);
 
   while (true) {
     try {
       await checkSensorStatus();
-      await new Promise(resolve => setTimeout(resolve, STATUS_CHECK_INTERVAL));
+      await new Promise((resolve) => setTimeout(resolve, STATUS_CHECK_INTERVAL));
     } catch (error) {
       console.error(`❌ Error in status monitor: ${error.message}`);
-      await new Promise(resolve => setTimeout(resolve, STATUS_CHECK_INTERVAL));
+      await new Promise((resolve) => setTimeout(resolve, STATUS_CHECK_INTERVAL));
     }
   }
 }
 
 // ============================================
-// Express Server Setup
+// Local Express Server (Optional local control/debug)
 // ============================================
 
 const app = express();
 app.use(express.json());
 
-/**
- * GET /sensor/status
- * Returns current sensor status
- */
 app.get('/sensor/status', (req, res) => {
-  const response = {
+  res.json({
     status: 'ok',
     enabled: sensorEnabled,
     device_id: DEVICE_ID,
-    sensor_id: SENSOR_ID,
-    timestamp: Date.now() / 1000
-  };
-  res.json(response);
+    sensor_id: sensorId,
+    timestamp: Date.now() / 1000,
+  });
 });
 
-/**
- * GET /sensor/control
- * Controls sensor on/off
- */
 app.get('/sensor/control', (req, res) => {
-  const action = req.query.action;
+  const action = String(req.query.action || '').toLowerCase();
 
   if (action === 'on') {
     sensorEnabled = true;
-    console.log('✅ Sensor turned ON');
-    res.json({ status: 'Sensor turned ON', enabled: true });
-  } else if (action === 'off') {
-    sensorEnabled = false;
-    console.log('⏸️  Sensor turned OFF');
-    res.json({ status: 'Sensor turned OFF', enabled: false });
-  } else {
-    res.status(400).json({ error: 'Invalid action. Use ?action=on or ?action=off' });
+    console.log('✅ Sensor turned ON (local endpoint)');
+    return res.json({ status: 'Sensor turned ON', enabled: true });
   }
+
+  if (action === 'off') {
+    sensorEnabled = false;
+    console.log('⏸️  Sensor turned OFF (local endpoint)');
+    return res.json({ status: 'Sensor turned OFF', enabled: false });
+  }
+
+  return res.status(400).json({ error: 'Invalid action. Use ?action=on or ?action=off' });
 });
 
-/**
- * GET /health
- * Health check endpoint
- */
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', sensor_enabled: sensorEnabled });
+  res.json({ status: 'ok', sensor_enabled: sensorEnabled, sensor_id: sensorId });
 });
 
-/**
- * Handle 404
- */
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -211,47 +221,34 @@ app.use((req, res) => {
 
 async function main() {
   try {
-    console.log('🚀 Initializing DHT11 Sensor Control...');
-    console.log('ℹ️  This script only handles sensor on/off control');
-    console.log('ℹ️  No sensor data will be sent to backend');
+    console.log('🚀 Initializing DHT11 Sensor Control Agent...');
+    console.log(`🌍 EC2 Sensor Control API: ${SENSOR_CONTROL_API_URL}`);
+    console.log(`📍 Local IP: ${getLocalIP() || 'unknown'}`);
+    console.log('ℹ️  Mode: control-only (no sensor data upload)');
 
-    // Register device IP with backend
-    await registerDeviceIP();
+    await registerSensor();
 
-    // Start Express HTTP server
     const server = app.listen(HTTP_PORT, '0.0.0.0', () => {
-      console.log(`🌐 HTTP Server started on port ${HTTP_PORT}`);
-      console.log('📍 Control Endpoints:');
-      console.log(`   - GET http://localhost:${HTTP_PORT}/sensor/status`);
-      console.log(`   - GET http://localhost:${HTTP_PORT}/sensor/control?action=on`);
-      console.log(`   - GET http://localhost:${HTTP_PORT}/sensor/control?action=off`);
-      console.log(`   - GET http://localhost:${HTTP_PORT}/health`);
+      console.log(`🌐 Local control server started on port ${HTTP_PORT}`);
+      console.log('Endpoints: /sensor/status, /sensor/control?action=on|off, /health');
     });
 
-    // Handle graceful shutdown
     process.on('SIGINT', () => {
       console.log('\n🛑 Shutting down gracefully...');
       server.close(() => {
-        console.log('🔌 Cleaning up...');
-        if (dhtSensor) {
-          dhtSensor.uninitialized();
-        }
         console.log('✅ Goodbye!');
         process.exit(0);
       });
     });
 
-    // Run status monitor in background
-    statusMonitorLoop().catch(error => {
+    statusMonitorLoop().catch((error) => {
       console.error(`❌ Fatal error in status monitor: ${error.message}`);
       process.exit(1);
     });
-
   } catch (error) {
     console.error(`❌ Fatal error: ${error.message}`);
     process.exit(1);
   }
 }
 
-// Start the application
 main();

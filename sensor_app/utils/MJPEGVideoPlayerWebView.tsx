@@ -162,13 +162,18 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   closeButton: {
-    padding: 8,
-    backgroundColor: '#333',
-    borderRadius: 4,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   closeButtonText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 22,
   },
   streamContainer: {
     flex: 1,

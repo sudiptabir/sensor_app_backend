@@ -19,10 +19,17 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const databaseUrl = process.env.DATABASE_URL || '';
+const isLocalDbUrl = /@(localhost|127\.0\.0\.1|::1)(:\d+)?\//i.test(databaseUrl);
+const dbSslOverride = (process.env.DB_SSL || '').toLowerCase();
+const useDbSsl = dbSslOverride
+  ? dbSslOverride === 'true'
+  : (process.env.NODE_ENV === 'production' && !isLocalDbUrl);
+
 // Initialize PostgreSQL connection for user blocking checks
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  connectionString: databaseUrl,
+  ssl: useDbSsl ? { rejectUnauthorized: false } : false
 });
 
 pool.on('error', (err) => {
@@ -30,6 +37,7 @@ pool.on('error', (err) => {
 });
 
 console.log('🔌 PostgreSQL connection initialized for user blocking checks');
+console.log(`🔐 PostgreSQL SSL enabled: ${useDbSsl}`);
 
 // Middleware
 app.use(helmet());
@@ -121,26 +129,90 @@ function generateNotificationContent(alert) {
 async function isUserBlocked(userId) {
   try {
     const result = await pool.query(
-      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      'SELECT user_id, email, display_name, is_blocked FROM app_users WHERE user_id = $1',
       [userId]
     );
-    
-    if (result.rows.length > 0) {
-      console.log(`🚫 User ${userId} is BLOCKED: ${result.rows[0].reason}`);
+
+    if (result.rows.length === 0) {
+      console.log(`ℹ️  User ${userId} not found in app_users`);
+      return { blocked: false, exists: false };
+    }
+
+    if (result.rows[0].is_blocked) {
+      console.log(`🚫 User ${userId} is BLOCKED in admin portal`);
       return {
         blocked: true,
-        reason: result.rows[0].reason,
-        blockedBy: result.rows[0].blocked_by,
-        blockedAt: result.rows[0].blocked_at
+        exists: true,
+        reason: 'User is blocked in admin portal'
       };
     }
-    
-    return { blocked: false };
+
+    return { blocked: false, exists: true };
   } catch (error) {
     console.error('❌ Error checking user block status:', error);
     // On error, allow notification (fail open for availability)
     return { blocked: false };
   }
+}
+
+async function getDeviceStatus(deviceId) {
+  try {
+    const result = await pool.query(
+      `SELECT device_id, device_name, location, is_active, last_seen, created_at, updated_at
+       FROM devices
+       WHERE device_id = $1`,
+      [deviceId]
+    );
+
+    if (result.rows.length === 0) {
+      return { exists: false, active: false };
+    }
+
+    return {
+      exists: true,
+      active: result.rows[0].is_active === true,
+      device: result.rows[0]
+    };
+  } catch (error) {
+    console.error('❌ Error checking device status:', error);
+    return { exists: false, active: false, error: error.message };
+  }
+}
+
+async function upsertDeviceInFirestore(deviceId, deviceInfo) {
+  if (!firebaseInitialized) {
+    throw new Error('Firebase is not initialized');
+  }
+
+  const db = admin.firestore();
+  const deviceRef = db.collection('devices').doc(deviceId);
+  const existingDoc = await deviceRef.get();
+  const timestamp = admin.firestore.Timestamp.now();
+  const existingData = existingDoc.exists ? existingDoc.data() || {} : {};
+  const firestorePayload = {
+    label: deviceInfo.label,
+    name: deviceInfo.name,
+    type: deviceInfo.type || existingData.type || 'sensor_device',
+    platform: deviceInfo.platform || existingData.platform || 'linux',
+    version: deviceInfo.version || existingData.version || 'unknown',
+    location: deviceInfo.location || existingData.location || 'Raspberry Pi',
+    isActive: true,
+    lastSeen: timestamp
+  };
+
+  // Keep existing owner when present; otherwise mark as unassigned for claim flow.
+  if (Object.prototype.hasOwnProperty.call(existingData, 'userId')) {
+    firestorePayload.userId = existingData.userId;
+  } else {
+    firestorePayload.userId = null;
+  }
+
+  if (!existingDoc.exists) {
+    firestorePayload.createdAt = timestamp;
+  }
+
+  await deviceRef.set(firestorePayload, { merge: true });
+  return firestorePayload;
 }
 
 /**
@@ -209,40 +281,49 @@ async function sendPushNotification(userId, alert, notificationContent) {
 }
 
 /**
- * Get all users who have access to a device
+ * Get users who have explicitly added this device — only the device owner.
+ * Looks up the device document in Firestore to find the userId who owns it,
+ * then verifies that user is not blocked in PostgreSQL.
  */
 async function getUsersForDevice(deviceId) {
-  if (!firebaseInitialized) {
-    console.log('⚠️  Firebase not initialized, cannot fetch device users');
-    return [];
-  }
-
   try {
+    if (!firebaseInitialized) {
+      console.warn('⚠️  Firebase not initialized — falling back to all non-blocked users');
+      const result = await pool.query(
+        `SELECT user_id FROM app_users WHERE is_blocked = false`
+      );
+      return result.rows.map((row) => row.user_id).filter(Boolean);
+    }
+
+    // Look up the device document in Firestore to find its owner
     const db = admin.firestore();
-    
-    // Get the device document to find its owner
     const deviceDoc = await db.collection('devices').doc(deviceId).get();
-    
-    // Check if document exists (handle both function and property)
-    const docExists = typeof deviceDoc.exists === 'function' ? deviceDoc.exists() : deviceDoc.exists;
-    
-    if (!docExists) {
-      console.warn('⚠️  Device not found:', deviceId);
+
+    if (!deviceDoc.exists) {
+      console.warn(`⚠️  Device ${deviceId} not found in Firestore — no users will receive this alert`);
       return [];
     }
 
     const deviceData = deviceDoc.data();
-    const ownerUserId = deviceData?.userId;
+    const ownerUserId = deviceData && deviceData.userId;
 
     if (!ownerUserId) {
-      console.warn('⚠️  Device has no owner:', deviceId);
+      console.warn(`⚠️  Device ${deviceId} has no userId in Firestore — no users will receive this alert`);
       return [];
     }
 
-    console.log('👤 Device owner:', ownerUserId);
-    
-    // For now, return just the owner
-    // In the future, you could add shared access logic here
+    // Verify the owner is not blocked in PostgreSQL
+    const result = await pool.query(
+      `SELECT user_id FROM app_users WHERE user_id = $1 AND is_blocked = false`,
+      [ownerUserId]
+    );
+
+    if (result.rows.length === 0) {
+      console.warn(`⚠️  Owner ${ownerUserId} of device ${deviceId} is blocked or not found — skipping alert`);
+      return [];
+    }
+
+    console.log(`👤 Alert for device ${deviceId} will be sent to its owner: ${ownerUserId}`);
     return [ownerUserId];
   } catch (error) {
     console.error('❌ Error getting users for device:', error);
@@ -318,6 +399,86 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Register a device through the alert API behind Nginx
+app.post('/api/devices/register', async (req, res) => {
+  try {
+    const expectedSecret = process.env.DEVICE_REGISTRATION_SECRET;
+    const providedSecret = req.get('x-device-secret');
+
+    if (!expectedSecret) {
+      return res.status(503).json({
+        error: 'DEVICE_REGISTRATION_SECRET is not configured on the server'
+      });
+    }
+
+    if (!providedSecret || providedSecret !== expectedSecret) {
+      return res.status(401).json({
+        error: 'Unauthorized device registration request'
+      });
+    }
+
+    const { deviceId, label, name, platform, version, location } = req.body || {};
+    const finalDeviceId = deviceId || uuidv4();
+    const finalName = label || name || `Device-${finalDeviceId.substring(0, 8)}`;
+    const finalLocation = location || 'Raspberry Pi';
+    const existingDevice = await getDeviceStatus(finalDeviceId);
+
+    const insertQuery = `
+      INSERT INTO devices (device_id, device_name, location, is_active, last_seen, created_at, updated_at)
+      VALUES ($1, $2, $3, true, NOW(), NOW(), NOW())
+      ON CONFLICT (device_id) DO UPDATE
+      SET device_name = EXCLUDED.device_name,
+          location = EXCLUDED.location,
+          is_active = true,
+          last_seen = NOW(),
+          updated_at = NOW()
+      RETURNING device_id, device_name, location, is_active, last_seen, created_at, updated_at
+    `;
+
+    const result = await pool.query(insertQuery, [
+      finalDeviceId,
+      finalName,
+      finalLocation
+    ]);
+
+    try {
+      await upsertDeviceInFirestore(finalDeviceId, {
+        label: finalName,
+        name: finalName,
+        platform,
+        version,
+        location: finalLocation,
+        type: 'sensor_device'
+      });
+    } catch (firestoreError) {
+      if (!existingDevice.exists) {
+        await pool.query('DELETE FROM devices WHERE device_id = $1', [finalDeviceId]);
+      }
+      throw firestoreError;
+    }
+
+    console.log('🆕 Device registered via API:', {
+      deviceId: finalDeviceId,
+      deviceName: finalName,
+      location: finalLocation
+    });
+
+    res.json({
+      success: true,
+      message: 'Device registered successfully',
+      deviceId: finalDeviceId,
+      device: result.rows[0],
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Device registration error:', error);
+    res.status(500).json({
+      error: 'Failed to register device',
+      message: error.message
+    });
+  }
+});
+
 // Receive and process alerts
 app.post('/api/alerts', async (req, res) => {
   try {
@@ -335,6 +496,33 @@ app.post('/api/alerts', async (req, res) => {
         error: 'Invalid alert data: missing detected_objects or risk_label'
       });
     }
+
+    const deviceStatus = await getDeviceStatus(deviceId);
+    if (deviceStatus.error) {
+      return res.status(500).json({
+        error: 'Failed to validate device status',
+        message: deviceStatus.error
+      });
+    }
+
+    if (!deviceStatus.exists) {
+      return res.status(404).json({
+        error: 'Device is not registered',
+        deviceId
+      });
+    }
+
+    if (!deviceStatus.active) {
+      return res.status(403).json({
+        error: 'Device is restricted and cannot send alerts',
+        deviceId
+      });
+    }
+
+    await pool.query(
+      'UPDATE devices SET last_seen = NOW(), updated_at = NOW() WHERE device_id = $1',
+      [deviceId]
+    );
 
     console.log('🚨 Received alert:', {
       deviceId,
@@ -430,6 +618,7 @@ app.listen(PORT, () => {
   console.log('============================');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🔥 Firebase initialized: ${firebaseInitialized}`);
+  console.log(`🆕 Device registration endpoint: http://localhost:${PORT}/api/devices/register`);
   console.log(`📡 Alert endpoint: http://localhost:${PORT}/api/alerts`);
   console.log(`💚 Health check: http://localhost:${PORT}/health`);
   console.log('============================');

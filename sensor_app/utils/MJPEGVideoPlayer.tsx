@@ -1,58 +1,78 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Image, Animated } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Image } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 
 interface MJPEGVideoPlayerProps {
   streamUrl: string;
   deviceLabel?: string;
+  apiKey?: string;
+  userId?: string;
   onClose?: () => void;
 }
 
 export default function MJPEGVideoPlayer({
   streamUrl,
   deviceLabel = 'Camera',
+  apiKey = '',
+  userId = '',
   onClose
 }: MJPEGVideoPlayerProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [uri, setUri] = useState('');
+  const [pendingUri, setPendingUri] = useState('');
+  const [isFetchingNext, setIsFetchingNext] = useState(false);
   const counterRef = useRef(0);
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const pendingUriRef = useRef('');
   const isFocused = useIsFocused();
+  const hasFrameUri = typeof uri === 'string' && uri.trim().length > 0;
+
+  const FRAME_REFRESH_MS = 2000;
+
+  const buildFrameUri = () => {
+    counterRef.current++;
+    const [streamPath] = streamUrl.split('?');
+    const baseUrl = streamPath.replace('/stream.mjpeg', '');
+    const apiKeyQuery = apiKey ? `apiKey=${encodeURIComponent(apiKey)}&` : '';
+    const userIdQuery = userId ? `userId=${encodeURIComponent(userId)}&` : '';
+    return `${baseUrl}/frame.jpg?${apiKeyQuery}${userIdQuery}t=${Date.now()}&fc=${counterRef.current}`;
+  };
 
   // Set initial URI
   useEffect(() => {
-    if (isFocused) {
+    if (isFocused && streamUrl) {
+      setError(null);
+      setLoading(true);
+      setPendingUri('');
+      setIsFetchingNext(false);
       updateFrame();
+    } else if (isFocused && !streamUrl) {
+      setError('Camera stream is not configured for this device');
     }
-  }, [isFocused, streamUrl]);
+  }, [isFocused, streamUrl, apiKey, userId]);
 
-  // Update frame URI
+  // Queue next frame for preloading. Visible frame is swapped only after load.
   const updateFrame = () => {
-    counterRef.current++;
-    const baseUrl = streamUrl.replace('/stream.mjpeg', '');
-    const newUri = `${baseUrl}/frame.jpg?t=${Date.now()}&fc=${counterRef.current}`;
-    setUri(newUri);
-    
-    // Fade animation for smoother transition
-    fadeAnim.setValue(0.8);
-    Animated.timing(fadeAnim, {
-      toValue: 1,
-      duration: 300,
-      useNativeDriver: true,
-    }).start();
+    if (!streamUrl || isFetchingNext) {
+      return;
+    }
+
+    const newUri = buildFrameUri();
+    pendingUriRef.current = newUri;
+    setPendingUri(newUri);
+    setIsFetchingNext(true);
   };
 
-  // Refresh frame every 1.5 seconds to reduce blinking
+  // Optional polling loop. Disabled when FRAME_REFRESH_MS <= 0.
   useEffect(() => {
-    if (!isFocused || error) return;
+    if (!isFocused || error || !streamUrl || FRAME_REFRESH_MS <= 0) return;
 
     const interval = setInterval(() => {
       updateFrame();
-    }, 1500);
+    }, FRAME_REFRESH_MS);
 
     return () => clearInterval(interval);
-  }, [isFocused, error, streamUrl]);
+  }, [isFocused, error, streamUrl, apiKey, userId, isFetchingNext]);
 
   if (error) {
     return (
@@ -94,22 +114,60 @@ export default function MJPEGVideoPlayer({
           </View>
         )}
 
-        <Animated.Image
-          source={{ 
-            uri: uri,
-            cache: 'reload'
-          }}
-          style={[styles.stream, { opacity: fadeAnim }]}
-          onLoad={() => {
-            if (loading) {
-              setLoading(false);
-            }
-          }}
-          onError={(err) => {
-            console.error('[Frame] Load error:', err);
-            setError('Failed to load frame');
-          }}
-        />
+        {hasFrameUri ? (
+          <Image
+            source={{ 
+              uri: uri,
+              cache: 'reload'
+            }}
+            style={styles.stream}
+            onLoad={() => {
+              if (loading) {
+                setLoading(false);
+              }
+            }}
+            onError={(err) => {
+              const nativeError = (err as any)?.nativeEvent?.error;
+              console.error('[Frame] Load error:', nativeError || err);
+              if (typeof nativeError === 'string' && nativeError.trim()) {
+                setError(`Failed to load frame: ${nativeError}`);
+              } else {
+                setError('Failed to load frame (camera unavailable or access denied)');
+              }
+            }}
+          />
+        ) : (
+          <Text style={styles.loadingText}>Preparing first frame...</Text>
+        )}
+
+        {pendingUri ? (
+          <Image
+            source={{
+              uri: pendingUri,
+              cache: 'reload'
+            }}
+            style={styles.preloadFrame}
+            onLoad={() => {
+              const nextFrameUri = pendingUriRef.current;
+              if (!nextFrameUri) {
+                setIsFetchingNext(false);
+                return;
+              }
+
+              setUri(nextFrameUri);
+              setPendingUri('');
+              setIsFetchingNext(false);
+
+              if (loading) {
+                setLoading(false);
+              }
+            }}
+            onError={() => {
+              setPendingUri('');
+              setIsFetchingNext(false);
+            }}
+          />
+        ) : null}
       </View>
 
       <View style={styles.footer}>
@@ -141,14 +199,18 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   closeButton: {
-    padding: 8,
-    backgroundColor: '#333',
-    borderRadius: 4,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   closeButtonText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: 'bold',
+    lineHeight: 22,
   },
   streamContainer: {
     flex: 1,
@@ -161,6 +223,12 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
     resizeMode: 'cover',
+  },
+  preloadFrame: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
   },
   loadingOverlay: {
     position: 'absolute',

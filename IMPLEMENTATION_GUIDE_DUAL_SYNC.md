@@ -1,7 +1,7 @@
 # Implementation Guide: Dual-System Database Sync
 
 ## Overview
-This guide explains how to implement seamless synchronization between Firebase (Firestore) and PostgreSQL (admin portal database) for devices and users.
+This guide explains how to implement seamless synchronization between Firebase (Firestore) and PostgreSQL (admin portal database) for devices and users. Device registration now goes through the Alert API behind Nginx instead of connecting Raspberry Pi directly to PostgreSQL.
 
 ---
 
@@ -49,29 +49,41 @@ Total users: 0
 
 ---
 
-## Step 2: Register New Devices (Dual-System Sync)
+## Step 2: Register New Devices Through Alert API (Nginx)
 
 ### Local or Raspberry Pi:
 ```bash
 cd /path/to/sensor_app
 
-# Register device in BOTH Firestore and PostgreSQL simultaneously
+# Create .env for API-based device registration + alert sending
+cat > .env << 'EOF'
+DEVICE_REGISTRATION_URL=http://13.205.201.82/alert-api/api/devices/register
+DEVICE_REGISTRATION_SECRET=your-strong-secret-here
+DEVICE_ID_FILE=./device_id.txt
+ALERT_API_URL=http://13.205.201.82/alert-api/api/alerts
+ADMIN_PORTAL_URL=http://13.205.201.82
+CHECK_ACCESS_BEFORE_SEND=true
+API_KEY=admin-portal-api-key-here
+EOF
+
+# Register device through Nginx -> Alert API -> Firestore + PostgreSQL
 node test_device_registration_dual_sync.js
 ```
 
 This will:
-1. Generate a unique device ID
-2. Register it in Firestore
-3. Register it in PostgreSQL
-4. Output the device ID for you to use
+1. Call the Alert API through Nginx
+2. Register the device in PostgreSQL on EC2
+3. Register the device in Firestore on EC2
+4. Save the returned device ID locally for reuse
+5. Allow the Pi to send alerts without any Firebase user ID in its `.env`
 
 Example output:
 ```
-✅ Device registered in Firestore: a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6
-✅ Device registered in PostgreSQL: a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6
+✅ Saved device ID to ./device_id.txt
 
 Device ID: a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6
 Device Name: your-hostname
+Registration Path: Raspberry Pi -> Nginx -> Alert API -> Firestore + PostgreSQL
 Status: Ready for use
 
 Next steps:
@@ -347,15 +359,17 @@ node test_device_registration_dual_sync.js
 ## API Reference
 
 ### Device Registration (Dual-System)
-**Endpoint:** Not an HTTP endpoint - run as Node.js script
+**Endpoint:** `POST /alert-api/api/devices/register` (called by Node.js script)
 ```bash
 node test_device_registration_dual_sync.js
 ```
 
 **What it does:**
-- Creates device in Firestore
-- Creates device in PostgreSQL
-- Both systems synchronized
+- Sends registration through Nginx to the Alert API
+- Creates or updates the device in Firestore
+- Creates or updates the device in PostgreSQL
+- Saves the device ID locally in `device_id.txt`
+- Does not require a Firebase user ID on the Raspberry Pi
 
 ---
 
@@ -429,10 +443,10 @@ Cookie: connect.sid=<session-cookie>
    - PostgreSQL updated: `UPDATE app_users SET is_blocked = true WHERE user_id = ?`
    - Can also insert into `user_blocks` table for additional audit trail
    
-2. **When user sends alert:**
-   - Alert API checks: `SELECT is_active FROM user_blocks WHERE user_id = ?`
-   - If blocked: Alert rejected with `403 User is blocked`
-   - If not blocked: Alert processed
+2. **When alerts are delivered to apps:**
+   - Alert API checks: `SELECT is_blocked FROM app_users WHERE user_id = ?`
+   - If blocked: alert storage and push notification are skipped for that user
+   - If not blocked: alert is stored in `users/{userId}/mlAlerts` and push is sent if the user has an Expo token
 
 ---
 
@@ -440,6 +454,15 @@ Cookie: connect.sid=<session-cookie>
 
 ### Device not appearing in admin portal
 ```bash
+# Check the API route through Nginx
+curl -X POST http://13.205.201.82/alert-api/api/devices/register \
+  -H "Content-Type: application/json" \
+  -H "x-device-secret: your-strong-secret-here" \
+  -d '{"label":"test-device","platform":"linux","version":"manual-test"}'
+
+# Check alert API logs on EC2
+pm2 logs alert-api --lines 50
+
 # Check PostgreSQL
 PGPASSWORD='sensor_admin_pass123' psql -h localhost -U sensor_admin -d sensor_db
 SELECT * FROM devices;
@@ -466,6 +489,11 @@ Verify PostgreSQL is being updated:
 PGPASSWORD='sensor_admin_pass123' psql -h localhost -U sensor_admin -d sensor_db -c "SELECT device_id, is_active FROM devices;"
 ```
 
+Test admin portal device precheck:
+```bash
+curl -H "x-api-key: admin-portal-api-key-here" http://13.205.201.82/api/check-device/<device-id>
+```
+
 Check alert API logs:
 ```bash
 pm2 logs alert-api --lines 50
@@ -479,7 +507,8 @@ pm2 logs alert-api --lines 50
 |------|---------|
 | `cleanup-dummy-data.sql` | Remove dummy devices/users from PostgreSQL |
 | `cleanup-dummy-firestore.js` | Remove dummy devices/users from Firestore |
-| `test_device_registration_dual_sync.js` | Register new devices in both systems |
+| `alert-api-v2/server.js` | Alert API device registration endpoint behind Nginx |
+| `test_device_registration_dual_sync.js` | Register new devices through Alert API |
 | `ADMIN_PORTAL_USER_SYNC_ENDPOINT.js` | Reference code for admin portal endpoints |
 | `IMPLEMENTATION_GUIDE.md` | This document |
 

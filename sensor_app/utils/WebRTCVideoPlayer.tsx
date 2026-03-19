@@ -480,14 +480,14 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   closeButton: {
-    backgroundColor: '#FF9800',
+    backgroundColor: '#DC2626',
     margin: 10,
     padding: 12,
-    borderRadius: 6,
+    borderRadius: 12,
     alignItems: 'center',
   },
   closeButtonText: {
-    color: '#000',
+    color: '#FFFFFF',
     fontWeight: 'bold',
   },
   errorContainer: {
@@ -525,10 +525,10 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   closeButtonError: {
-    backgroundColor: '#FF9800',
+    backgroundColor: '#DC2626',
     paddingHorizontal: 24,
     paddingVertical: 10,
-    borderRadius: 6,
+    borderRadius: 12,
   },
 });
 

@@ -11,6 +11,8 @@ const webClientId =
   process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ??
   Constants.expoConfig?.extra?.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
 
+const adminPortalUrl = process.env.EXPO_PUBLIC_ADMIN_PORTAL_URL || 'http://13.205.201.82';
+
 GoogleSignin.configure({
   webClientId: webClientId,
   offlineAccess: true,
@@ -66,6 +68,30 @@ export default function LoginScreen() {
       console.log("[Login] Credential created");
 
       const firebaseUser = await signInWithCredential(auth, credential);
+
+      if (firebaseUser.user) {
+        try {
+          const syncResponse = await fetch(`${adminPortalUrl}/api/users/sync`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              userId: firebaseUser.user.uid,
+              email: firebaseUser.user.email,
+              displayName: firebaseUser.user.displayName || user.name || firebaseUser.user.email,
+            }),
+          });
+
+          if (!syncResponse.ok) {
+            console.warn('[Login] Failed to sync user to admin portal:', await syncResponse.text());
+          } else {
+            console.log('[Login] ✅ User synced to admin portal');
+          }
+        } catch (syncError) {
+          console.warn('[Login] User sync error:', syncError);
+        }
+      }
 
       console.log("[Login] ✅ Firebase sign-in success:", firebaseUser.user.email);
       setSignedInEmail(firebaseUser.user.email);
@@ -168,7 +194,7 @@ export default function LoginScreen() {
                 textAlign: "center",
               }}
             >
-              Sensor App
+              RuTAG-HACS
             </Text>
 
             {/* Subtitle */}

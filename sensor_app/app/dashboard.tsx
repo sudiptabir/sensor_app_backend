@@ -1,12 +1,11 @@
-import { View, Text, Button, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Alert, TextInput, Modal, Linking, Image } from "react-native";
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, FlatList, TouchableOpacity, Modal, Linking, Image } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { signOut, onAuthStateChanged } from "firebase/auth";
 import { auth } from "../firebase/firebaseConfig";
 import { useState, useEffect, useRef } from "react";
-import { listenToUserDevices, updateDeviceLabel, listenToDeviceReadings, getAvailableDevicesForUser, claimDevice, unclaimDevice, listenToUserAlerts, updateAlertRating, listenToUserMLAlerts, updateMLAlertRating, getUserMLAlerts, debugCheckAlertsCollections } from "../db/firestore";
+import { listenToUserDevices, updateDeviceLabel, listenToDeviceReadings, getAvailableDevicesForUser, claimDevice, unclaimDevice, updateAlertRating, listenToUserMLAlerts, updateMLAlertRating } from "../db/firestore";
 import { useRouter } from "expo-router";
 import { initPushNotifications, setupNotificationListeners } from "../utils/notifications";
-import { getCameraStreamUrl, getCameraWebUIUrl, getDeviceStreamingInfo } from "../utils/cameraStreaming";
 import { rateMLAlert, acknowledgeAlert, deleteAlert } from "../utils/mlAlertHandler";
 import MJPEGVideoPlayer from "../utils/MJPEGVideoPlayer";
 import { LinearGradient } from "expo-linear-gradient";
@@ -17,6 +16,7 @@ import SensorCard from "../components/SensorCard";
 import IconButton from "../components/IconButton";
 import StyledAlert, { StyledAlertProps } from "../components/StyledAlert";
 import { getFirestore, collection, addDoc, serverTimestamp, getDocs, deleteDoc, doc, query, where, Timestamp } from 'firebase/firestore';
+import { getStorage, ref as storageRef, getDownloadURL } from 'firebase/storage';
 import { SvgUri } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -25,7 +25,6 @@ export default function Dashboard() {
   const insets = useSafeAreaInsets();
   const [loggingOut, setLoggingOut] = useState(false);
   const [isUserLoggedIn, setIsUserLoggedIn] = useState(!!auth.currentUser);
-  const [alerts, setAlerts] = useState<any[]>([]);
   const [mlAlerts, setMLAlerts] = useState<MLAlert[]>([]);
   const [devices, setDevices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,10 +34,8 @@ export default function Dashboard() {
   const [availableDevices, setAvailableDevices] = useState<any[]>([]);
   const [loadingAvailable, setLoadingAvailable] = useState(false);
   const [claimingDeviceId, setClaimingDeviceId] = useState<string | null>(null);
-  const [unsubscribeAlerts, setUnsubscribeAlerts] = useState<(() => void) | null>(null);
   const [unsubscribeDevices, setUnsubscribeDevices] = useState<(() => void) | null>(null);
   const [unsubscribeMLAlerts, setUnsubscribeMLAlerts] = useState<(() => void) | null>(null);
-  const [readingsUnsubscribes, setReadingsUnsubscribes] = useState<(() => void)[]>([]);
   const [showRatingModal, setShowRatingModal] = useState(false);
   const [selectedAlert, setSelectedAlert] = useState<any | null>(null);
   const [selectedRating, setSelectedRating] = useState<number | null>(null);
@@ -53,6 +50,11 @@ export default function Dashboard() {
   const [selectedMLAlert, setSelectedMLAlert] = useState<MLAlert | null>(null);
   const [mlAlertRating, setMLAlertRating] = useState<number | null>(null);
   const [mlAlertAccuracy, setMLAlertAccuracy] = useState<boolean | null>(null);
+  const [showAlertImageModal, setShowAlertImageModal] = useState(false);
+  const [selectedAlertImageUri, setSelectedAlertImageUri] = useState('');
+  const [selectedAlertImageSource, setSelectedAlertImageSource] = useState('');
+  const [alertImageLoading, setAlertImageLoading] = useState(false);
+  const [alertImageError, setAlertImageError] = useState<string | null>(null);
   // Test notification state removed
   
   // Styled Alert States
@@ -70,13 +72,55 @@ export default function Dashboard() {
   const [deviceSensors, setDeviceSensors] = useState<any[]>([]);
   const [selectedSensor, setSelectedSensor] = useState<any | null>(null);
   const [loadingSensors, setLoadingSensors] = useState(false);
+  const sensorControlBaseUrl = (process.env.EXPO_PUBLIC_SENSOR_CONTROL_URL || process.env.EXPO_PUBLIC_ADMIN_PORTAL_URL || 'http://13.205.201.82').replace(/\/$/, '');
+  const sensorControlApiUrl = `${sensorControlBaseUrl}/sensor-api`;
+  const cameraApiUrl = `${sensorControlBaseUrl}/camera-api`;
+  const appApiKey = process.env.EXPO_PUBLIC_API_KEY || '';
+
+  const getDirectDeviceStreamUrl = (device: any, metadata?: any): string => {
+    const metadataStreamUrl = `${metadata?.streamUrl || metadata?.stream_url || ''}`.trim();
+    if (metadataStreamUrl) {
+      return metadataStreamUrl;
+    }
+
+    const deviceStreamUrl = `${device?.streaming_url || device?.streamUrl || ''}`.trim();
+    if (deviceStreamUrl) {
+      return deviceStreamUrl;
+    }
+
+    const deviceIp = `${device?.ipAddress || device?.ip_address || ''}`.trim();
+    if (deviceIp) {
+      return `http://${deviceIp}:8080/stream.mjpeg`;
+    }
+
+    return '';
+  };
+
+  const getCameraProxyStreamUrl = (device: any): string => {
+    const resolvedCameraStreamUrl = `${device?.resolvedCameraStreamUrl || ''}`.trim();
+    if (resolvedCameraStreamUrl) {
+      return resolvedCameraStreamUrl;
+    }
+
+    const deviceId = device?.id || device?.deviceId || device?.device_id;
+    if (!deviceId) {
+      return '';
+    }
+
+    return `${cameraApiUrl}/api/camera/${encodeURIComponent(deviceId)}/stream.mjpeg`;
+  };
 
   // Track which alerts have already been notified
   const shownNotificationsRef = useRef<Set<string>>(new Set());
+  const mlAlertsRef = useRef<MLAlert[]>([]);
+  const readingsUnsubscribesRef = useRef<(() => void)[]>([]);
 
-  // Polling interval refs
-  const mlAlertsPollingRef = useRef<NodeJS.Timeout | null>(null);
-  const devicesPollingRef = useRef<NodeJS.Timeout | null>(null);
+  const cleanupDeviceReadingListeners = () => {
+    readingsUnsubscribesRef.current.forEach((unsub) => {
+      if (typeof unsub === "function") unsub();
+    });
+    readingsUnsubscribesRef.current = [];
+  };
 
   // ✅ NEW: Monitor auth state changes and control polling
   useEffect(() => {
@@ -86,20 +130,12 @@ export default function Dashboard() {
       if (currentUser) {
         console.log("[Dashboard] ✅ User authenticated:", currentUser.uid);
         setIsUserLoggedIn(true);
-        // User is logged in - polling will be handled by the separate polling effect
       } else {
-        console.log("[Dashboard] 🚫 User logged out, stopping all polling...");
+        console.log("[Dashboard] 🚫 User logged out, stopping listeners...");
         setIsUserLoggedIn(false);
-        // Stop ML alerts polling
-        if (mlAlertsPollingRef.current) {
-          clearInterval(mlAlertsPollingRef.current);
-          mlAlertsPollingRef.current = null;
-        }
-        // Stop devices polling
-        if (devicesPollingRef.current) {
-          clearInterval(devicesPollingRef.current);
-          devicesPollingRef.current = null;
-        }
+        setDevices([]);
+        setMLAlerts([]);
+        cleanupDeviceReadingListeners();
       }
     });
 
@@ -108,135 +144,64 @@ export default function Dashboard() {
     };
   }, []);
 
-  // Listen to alerts real-time
+  // Listen to ML alerts in real-time from users/{userId}/mlAlerts.
   useEffect(() => {
-    console.log("[Dashboard] Setting up alerts listener");
-    const unsubscribe = listenToUserAlerts((data) => {
-      console.log("[Dashboard] Alerts updated:", data.length);
-      setAlerts(data);
-    });
-    setUnsubscribeAlerts(unsubscribe);
-    return unsubscribe;
-  }, []);
-
-  // Poll ML alerts with fallback (onSnapshot not working reliably)
-  useEffect(() => {
-    console.log("[Dashboard] Setting up ML alerts polling (fallback from real-time listener)");
-
-    const pollMLAlerts = async () => {
-      try {
-        const currentUser = auth.currentUser;
-        
-        // STOP polling if user is not authenticated
-        if (!currentUser) {
-          console.log("[Dashboard] 🚫 User not authenticated, skipping ML alerts poll");
-          // Clear the polling interval if it exists
-          if (mlAlertsPollingRef.current) {
-            clearInterval(mlAlertsPollingRef.current);
-            mlAlertsPollingRef.current = null;
-          }
-          return;
-        }
-        
-        console.log("[Dashboard] Starting ML alerts poll...");
-        console.log("[Dashboard] Current user ID:", currentUser.uid);
-        
-        // Debug: Check what's actually in Firestore
-        await debugCheckAlertsCollections();
-        
-        // Use the proper getUserMLAlerts function that fetches from devices collection
-        const alerts = await getUserMLAlerts(100);
-
-        console.log("[Dashboard] ML Alerts polling: Found", alerts.length, "alerts");
-        // Debug: log first alert's fields
-        if (alerts.length > 0) {
-          console.log("[Dashboard] First alert fields:", Object.keys(alerts[0]));
-          console.log("[Dashboard] First alert ratingAccuracy:", alerts[0].ratingAccuracy);
-        } else {
-          console.warn("[Dashboard] No alerts found from getUserMLAlerts");
-          console.warn("[Dashboard] Expected alerts in: users/" + currentUser.uid + "/mlAlerts");
-        }
-        setMLAlerts(alerts);
-        setLoading(false);
-
-        // Show local notification for NEW alerts only
-        alerts.forEach((alert) => {
-          if (alert.id && !shownNotificationsRef.current.has(alert.id)) {
-            console.log("[Dashboard] New alert detected, showing notification:", alert.id);
-            
-            try {
-              // Schedule local notification immediately
-              Notifications.scheduleNotificationAsync({
-                content: {
-                  title: `🤖 ${alert.riskLabel?.toUpperCase() || "ALERT"}`,
-                  body: `${alert.detectedObjects?.join(", ") || "Detection"} - ${alert.deviceIdentifier || "Unknown Device"}`,
-                  badge: 1,
-                  sound: true,
-                  data: {
-                    alertId: alert.id,
-                    riskLabel: alert.riskLabel,
-                    detectedObjects: alert.detectedObjects?.join(", "),
-                  },
-                },
-                trigger: {
-                  type: "time" as const,
-                  seconds: 1, // Show immediately
-                },
-              }).then(() => {
-                console.log("[Dashboard] ✅ Notification scheduled for alert:", alert.id);
-              }).catch((error) => {
-                console.error("[Dashboard] ❌ Failed to schedule notification:", error);
-              });
-            } catch (error) {
-              console.error("[Dashboard] Exception scheduling notification:", error);
-            }
-            
-            shownNotificationsRef.current.add(alert.id);
-          }
-        });
-      } catch (error) {
-        // If user is not logged in, this is expected - don't log as error
-        if (!auth.currentUser || !isUserLoggedIn) {
-          console.log("[Dashboard] Poll attempted after logout - stopping polling");
-          if (mlAlertsPollingRef.current) {
-            clearInterval(mlAlertsPollingRef.current);
-            mlAlertsPollingRef.current = null;
-          }
-          setLoading(false);
-          setMLAlerts([]);
-          return;
-        }
-        
-        console.error("[Dashboard] Error polling ML alerts:", error);
-        // If auth error, stop polling immediately
-        if (error instanceof Error && error.message.includes("not authenticated")) {
-          console.log("[Dashboard] Auth error detected - stopping polling");
-          if (mlAlertsPollingRef.current) {
-            clearInterval(mlAlertsPollingRef.current);
-            mlAlertsPollingRef.current = null;
-          }
-        }
-        // Still try to set loading to false so UI doesn't show spinner forever
-        setLoading(false);
-        setMLAlerts([]);
-      }
-    };
-
-    // Poll every 5 seconds for ML alerts (only if user is authenticated)
-    const currentUser = auth.currentUser;
-    if (currentUser && isUserLoggedIn) {
-      pollMLAlerts();
-      mlAlertsPollingRef.current = setInterval(pollMLAlerts, 5000);
-    } else {
-      console.log("[Dashboard] User not authenticated, skipping alert polling setup");
+    if (!isUserLoggedIn) {
+      setMLAlerts([]);
+      return;
     }
 
+    console.log("[Dashboard] Setting up real-time ML alerts listener");
+
+    const unsubscribe = listenToUserMLAlerts((alerts) => {
+      setMLAlerts(alerts);
+      setLoading(false);
+
+      alerts.forEach((alert) => {
+        if (!alert.id || shownNotificationsRef.current.has(alert.id)) {
+          return;
+        }
+
+        try {
+          Notifications.scheduleNotificationAsync({
+            content: {
+              title: `🤖 ${alert.riskLabel?.toUpperCase() || "ALERT"}`,
+              body: `${alert.detectedObjects?.join(", ") || "Detection"} - ${alert.deviceIdentifier || "Unknown Device"}`,
+              badge: 1,
+              sound: true,
+              data: {
+                alertId: alert.id,
+                riskLabel: alert.riskLabel,
+                detectedObjects: alert.detectedObjects?.join(", "),
+              },
+            },
+            trigger: {
+              type: "time" as const,
+              seconds: 1,
+            },
+          }).catch((error) => {
+            console.error("[Dashboard] ❌ Failed to schedule notification:", error);
+          });
+        } catch (error) {
+          console.error("[Dashboard] Exception scheduling notification:", error);
+        }
+
+        shownNotificationsRef.current.add(alert.id);
+      });
+    });
+
+    setUnsubscribeMLAlerts(() => unsubscribe);
+
     return () => {
-      if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
+      if (typeof unsubscribe === "function") unsubscribe();
     };
   }, [isUserLoggedIn]);
 
   // Setup notification tap handler to navigate to alert details
+  useEffect(() => {
+    mlAlertsRef.current = mlAlerts;
+  }, [mlAlerts]);
+
   useEffect(() => {
     console.log("[Dashboard] Setting up notification tap handler");
     
@@ -246,8 +211,8 @@ export default function Dashboard() {
       if (alertId) {
         console.log("[Dashboard] Notification tapped for alert:", alertId);
         
-        // Find the alert in mlAlerts
-        const alert = mlAlerts.find((a) => a.id === alertId);
+        // Use a ref so listener setup happens once and still sees latest alerts.
+        const alert = mlAlertsRef.current.find((a) => a.id === alertId);
         if (alert) {
           console.log("[Dashboard] Found alert, opening detail modal");
           setSelectedMLAlert(alert);
@@ -262,79 +227,55 @@ export default function Dashboard() {
     return () => {
       notificationTapSubscription.remove();
     };
-  }, [mlAlerts]);
+  }, []);
 
-  // Listen to devices with polling (fallback from onSnapshot)
+  // Listen to owned devices in real-time and attach readings listeners for visible devices.
   useEffect(() => {
-    console.log("[Dashboard] Setting up device polling (fallback from real-time listener)");
-    
-    // Initial fetch
-    const pollDevices = async () => {
-      try {
-        const currentUser = auth.currentUser;
-        if (!currentUser) {
-          console.log("[Dashboard] User not authenticated - skipping device poll");
-          setDevices([]);
-          setLoading(false);
-          return;
-        }
-
-        const db = getFirestore();
-        const devicesQuery = query(
-          collection(db, "devices"),
-          where("userId", "==", currentUser.uid)
-        );
-        const snapshot = await getDocs(devicesQuery);
-
-        const userDevices = snapshot.docs.map((doc) => {
-          const data = doc.data();
-          return { id: doc.id, ...data };
-        });
-
-        console.log("[Dashboard] Polling: Found", userDevices.length, "devices for user");
-        setDevices(userDevices);
-        setLoading(false);
-
-        // Unsubscribe from previous readings listeners
-        readingsUnsubscribes.forEach((unsub) => {
-          if (typeof unsub === 'function') unsub();
-        });
-
-        // Only setup readings listeners if user is still authenticated
-        if (!auth.currentUser) {
-          console.log("[Dashboard] User not authenticated - skipping readings listeners");
-          setReadingsUnsubscribes([]);
-          return;
-        }
-
-        // Setup readings listeners for each device
-        const newUnsubscribes: (() => void)[] = [];
-        userDevices.forEach((device) => {
-        const readingsUnsub = listenToDeviceReadings(device.id, (readings) => {
-          setDeviceReadings((prev) => ({
-            ...prev,
-            [device.id]: readings,
-          }));
-        }, 5);
-        newUnsubscribes.push(readingsUnsub);
-        });
-        setReadingsUnsubscribes(newUnsubscribes);
-      } catch (error) {
-        console.error("[Dashboard] Error polling devices:", error);
-        setLoading(false);
-      }
-    };
-
-    // Poll every 15 seconds (was 5s, causing rate limit)
-    if (isUserLoggedIn) {
-      pollDevices();
-      devicesPollingRef.current = setInterval(pollDevices, 15000);
+    if (!isUserLoggedIn) {
+      setDevices([]);
+      cleanupDeviceReadingListeners();
+      return;
     }
 
+    console.log("[Dashboard] Setting up real-time device listener");
+
+    const unsubscribe = listenToUserDevices((userDevices) => {
+      console.log("[Dashboard] Realtime: Found", userDevices.length, "devices for user");
+      setDevices(userDevices);
+      setLoading(false);
+
+      cleanupDeviceReadingListeners();
+
+      if (!auth.currentUser) {
+        console.log("[Dashboard] User not authenticated - skipping readings listeners");
+        return;
+      }
+
+      const newUnsubscribes: (() => void)[] = [];
+      userDevices.forEach((device) => {
+        const readingsUnsub = listenToDeviceReadings(
+          device.id,
+          (readings) => {
+            setDeviceReadings((prev) => ({
+              ...prev,
+              [device.id]: readings,
+            }));
+          },
+          5
+        );
+        newUnsubscribes.push(readingsUnsub);
+      });
+
+      readingsUnsubscribesRef.current = newUnsubscribes;
+    });
+
+    setUnsubscribeDevices(() => unsubscribe);
+
     return () => {
-      if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
+      if (typeof unsubscribe === "function") unsubscribe();
+      cleanupDeviceReadingListeners();
     };
-  }, [readingsUnsubscribes, isUserLoggedIn]);
+  }, [isUserLoggedIn]);
 
   // Initialize push notifications
   useEffect(() => {
@@ -365,16 +306,10 @@ export default function Dashboard() {
     try {
       setLoggingOut(true);
       // Unsubscribe from all listeners before logout
-      if (unsubscribeAlerts && typeof unsubscribeAlerts === 'function') unsubscribeAlerts();
       if (unsubscribeMLAlerts && typeof unsubscribeMLAlerts === 'function') unsubscribeMLAlerts();
       if (unsubscribeDevices && typeof unsubscribeDevices === 'function') unsubscribeDevices();
-      // Clear polling intervals
-      if (devicesPollingRef.current) clearInterval(devicesPollingRef.current);
-      if (mlAlertsPollingRef.current) clearInterval(mlAlertsPollingRef.current);
       // Unsubscribe from all readings listeners
-      readingsUnsubscribes.forEach((unsub) => {
-        if (typeof unsub === 'function') unsub();
-      });
+      cleanupDeviceReadingListeners();
       await signOut(auth);
     } catch (err) {
       console.error("❌ Logout failed:", err);
@@ -387,17 +322,67 @@ export default function Dashboard() {
     title: string,
     message: string,
     type: 'success' | 'error' | 'info' | 'warning' | 'question' = 'info',
-    buttons?: Array<{ text: string; onPress?: () => void; style?: 'default' | 'cancel' | 'destructive' }>
+    buttons?: Array<{ text: string; onPress?: () => void; style?: 'default' | 'cancel' | 'destructive' }>,
+    inputConfig?: StyledAlertProps['inputConfig'],
+    buttonLayout?: StyledAlertProps['buttonLayout']
   ) => {
     setStyledAlertConfig({
       visible: true,
       title,
       message,
       type,
-      buttons: buttons || [{ text: 'OK', style: 'default' }],
+      buttons: inputConfig ? undefined : (buttons || [{ text: 'OK', style: 'default' }]),
+      inputConfig,
+      buttonLayout,
       onClose: () => setStyledAlertVisible(false),
     });
     setStyledAlertVisible(true);
+  };
+
+  const resolveAlertImageUri = async (imageSource: string): Promise<string> => {
+    const raw = `${imageSource || ''}`.trim();
+    if (!raw) {
+      throw new Error('Image path is empty');
+    }
+
+    if (
+      raw.startsWith('http://') ||
+      raw.startsWith('https://') ||
+      raw.startsWith('data:image/') ||
+      raw.startsWith('file://')
+    ) {
+      return raw;
+    }
+
+    if (raw.startsWith('gs://')) {
+      const storage = getStorage();
+      const fileRef = storageRef(storage, raw);
+      return getDownloadURL(fileRef);
+    }
+
+    if (raw.startsWith('/')) {
+      return `${sensorControlBaseUrl}${raw}`;
+    }
+
+    return raw;
+  };
+
+  const openAlertImage = async (imageSource: string) => {
+    setShowAlertImageModal(true);
+    setSelectedAlertImageSource(imageSource || '');
+    setSelectedAlertImageUri('');
+    setAlertImageError(null);
+    setAlertImageLoading(true);
+
+    try {
+      const resolvedUri = await resolveAlertImageUri(imageSource);
+      setSelectedAlertImageUri(resolvedUri);
+    } catch (error: any) {
+      const message = error?.message || 'Unable to load image';
+      setAlertImageError(message);
+    } finally {
+      setAlertImageLoading(false);
+    }
   };
 
   const handleOpenRatingModal = (alert: any) => {
@@ -435,9 +420,10 @@ export default function Dashboard() {
       const available = await getAvailableDevicesForUser();
       
       if (available.length === 0) {
-        Alert.alert(
+        showStyledAlert(
           "No More Devices Left",
-          "All available devices have been added. Remove a device from your account to add it again, or wait for a new device to register."
+          "All available devices have been added. Remove a device from your account to add it again, or wait for a new device to register.",
+          "info"
         );
         return;
       }
@@ -446,7 +432,7 @@ export default function Dashboard() {
       setShowAddModal(true);
     } catch (error) {
       console.error("[Dashboard] Error fetching available devices:", error);
-      Alert.alert("Error", "Failed to fetch available devices");
+      showStyledAlert("Error", "Failed to fetch available devices", "error");
     } finally {
       setLoadingAvailable(false);
     }
@@ -467,28 +453,40 @@ export default function Dashboard() {
     }
   };
 
-  const handleUpdateLabel = (deviceId: string) => {
-    Alert.prompt(
-      "Update Device Label",
-      "Enter new label for this device",
-      [
-        { text: "Cancel", onPress: () => {} },
-        {
-          text: "Update",
-          onPress: async (newLabel: string | undefined) => {
-            if (!newLabel?.trim()) return;
-            try {
-              await updateDeviceLabel(deviceId, newLabel.trim());
-              console.log("[Dashboard] Label updated:", deviceId);
-            } catch (error) {
-              console.error("[Dashboard] Error updating label:", error);
-              Alert.alert("Error", "Failed to update label");
-            }
-          },
-        },
-      ],
-      "plain-text"
+  const handleUpdateLabel = (deviceId: string, currentLabel?: string) => {
+    showStyledAlert(
+      'Update Device Label',
+      'Enter new label for this device',
+      'question',
+      undefined,
+      {
+        enabled: true,
+        initialValue: (currentLabel || '').trim(),
+        placeholder: 'Device label',
+        maxLength: 40,
+        submitText: 'OK',
+        cancelText: 'Cancel',
+        onSubmit: (inputValue) => submitUpdatedLabel(deviceId, inputValue),
+      }
     );
+  };
+
+  const submitUpdatedLabel = async (deviceId: string, inputValue: string) => {
+    const newLabel = inputValue.trim();
+    if (!newLabel) {
+      showStyledAlert('Missing Label', 'Please enter a device label', 'warning');
+      return;
+    }
+
+    try {
+      await updateDeviceLabel(deviceId, newLabel);
+      console.log('[Dashboard] Label updated:', deviceId);
+      setStyledAlertVisible(false);
+      showStyledAlert('Success', 'Device label updated', 'success');
+    } catch (error) {
+      console.error('[Dashboard] Error updating label:', error);
+      showStyledAlert('Error', 'Failed to update label', 'error');
+    }
   };
 
   const handleUnclaimDevice = (deviceId: string, label: string) => {
@@ -497,7 +495,6 @@ export default function Dashboard() {
       `Are you sure you want to remove "${label}" from your devices?\n\n(The device will not be deleted, just removed from your account)`,
       "question",
       [
-        { text: "Cancel", style: "cancel" },
         {
           text: "Remove",
           style: "destructive",
@@ -513,7 +510,67 @@ export default function Dashboard() {
             }
           },
         },
-      ]
+        { text: "Cancel", style: "cancel" },
+      ],
+      undefined,
+      'stacked'
+    );
+  };
+
+  const handleDeleteMLAlert = (alert: MLAlert) => {
+    if (!alert?.id || !alert?.deviceId) {
+      showStyledAlert('Error', 'Alert details are incomplete', 'error');
+      return;
+    }
+
+    showStyledAlert(
+      'Delete Alert',
+      'This will permanently remove the alert from your history.',
+      'question',
+      [
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setStyledAlertVisible(false);
+            try {
+              await deleteAlert(alert.deviceId, alert.id);
+              setShowMLAlertDetailModal(false);
+              setSelectedMLAlert(null);
+              setMLAlertRating(null);
+              setMLAlertAccuracy(null);
+              showStyledAlert('Deleted', 'Alert has been removed', 'success');
+            } catch (error) {
+              console.error('[Dashboard] Error deleting alert:', error);
+              showStyledAlert('Error', 'Failed to delete alert', 'error');
+            }
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      undefined,
+      'stacked'
+    );
+  };
+
+  const handleLogoutConfirmation = () => {
+    showStyledAlert(
+      'Logout',
+      'Do you want to sign out of RuTAG-HACS now?',
+      'question',
+      [
+        {
+          text: 'Logout',
+          style: 'destructive',
+          onPress: async () => {
+            setStyledAlertVisible(false);
+            await handleLogout();
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      undefined,
+      'stacked'
     );
   };
 
@@ -523,16 +580,179 @@ export default function Dashboard() {
     return readings[0];
   };
 
+  // Validate camera access/registration before opening the video modal.
+  const openDeviceCamera = async (device: any) => {
+    try {
+      const deviceId = device?.id || device?.deviceId || device?.device_id;
+      const userId = auth.currentUser?.uid || '';
+      const directStreamUrl = getDirectDeviceStreamUrl(device);
+      const proxyStreamUrl = `${cameraApiUrl}/api/camera/${encodeURIComponent(deviceId || '')}/stream.mjpeg`;
+
+      if (!deviceId) {
+        showStyledAlert('Camera Unavailable', 'Device ID is missing for this camera.', 'error');
+        return;
+      }
+
+      if (!appApiKey) {
+        if (directStreamUrl) {
+          setSelectedDeviceForVideo({
+            ...device,
+            resolvedCameraStreamUrl: directStreamUrl,
+            useProxyCamera: false,
+          });
+          setShowVideoPlayer(true);
+          showStyledAlert('Using Direct Camera', 'Proxy API key is missing, so the app is using direct camera stream from the device.', 'warning');
+          return;
+        }
+
+        showStyledAlert('Camera Unavailable', 'EXPO_PUBLIC_API_KEY is not configured in the app and no direct stream URL is available.', 'error');
+        return;
+      }
+
+      if (!userId) {
+        showStyledAlert('Camera Unavailable', 'You need to be signed in to view camera stream.', 'error');
+        return;
+      }
+
+      const metadataUrl = `${cameraApiUrl}/api/camera/device/${encodeURIComponent(deviceId)}?apiKey=${encodeURIComponent(appApiKey)}&userId=${encodeURIComponent(userId)}`;
+      const response = await fetch(metadataUrl);
+
+      if (response.ok) {
+        let metadata: any = {};
+        try {
+          metadata = await response.json();
+        } catch {
+          metadata = {};
+        }
+
+        const directStreamFromMetadata = getDirectDeviceStreamUrl(device, metadata);
+
+        // Probe one frame first so we fail fast with a clear message if EC2 cannot reach the Pi URL.
+        const frameProbeUrl = `${cameraApiUrl}/api/camera/${encodeURIComponent(deviceId)}/frame.jpg?apiKey=${encodeURIComponent(appApiKey)}&userId=${encodeURIComponent(userId)}&t=${Date.now()}`;
+        const frameProbe = await fetch(frameProbeUrl);
+
+        if (!frameProbe.ok) {
+          if (frameProbe.status === 502) {
+            if (directStreamFromMetadata) {
+              setSelectedDeviceForVideo({
+                ...device,
+                resolvedCameraStreamUrl: directStreamFromMetadata,
+                useProxyCamera: false,
+              });
+              setShowVideoPlayer(true);
+              showStyledAlert(
+                'Using Direct Camera',
+                'EC2 proxy cannot reach the camera right now. Opened direct stream from device metadata.',
+                'warning'
+              );
+              return;
+            }
+
+            showStyledAlert(
+              'Camera Not Reachable',
+              'Camera is registered, but EC2 cannot reach the stream URL. If the Pi registered a private IP (like 192.168.x.x), set CAMERA_PUBLIC_STREAM_URL and CAMERA_PUBLIC_FRAME_URL to a public/tunnel URL and restart mjpeg-camera-server.js.',
+              'error'
+            );
+            return;
+          }
+
+          if (frameProbe.status === 403) {
+            showStyledAlert('Access Denied', 'User or device is blocked by admin.', 'error');
+            return;
+          }
+
+          if (frameProbe.status === 404) {
+            showStyledAlert('Camera Not Ready', 'Camera stream entry was not found. Restart mjpeg-camera-server.js on the device.', 'error');
+            return;
+          }
+
+          showStyledAlert('Camera Unavailable', `Unable to load camera frame (${frameProbe.status}).`, 'error');
+          return;
+        }
+
+        setSelectedDeviceForVideo({
+          ...device,
+          resolvedCameraStreamUrl: proxyStreamUrl,
+          useProxyCamera: true,
+        });
+        setShowVideoPlayer(true);
+        return;
+      }
+
+      let errorData: any = {};
+      try {
+        errorData = await response.json();
+      } catch {
+        errorData = {};
+      }
+
+      if (response.status === 404) {
+        if (directStreamUrl) {
+          setSelectedDeviceForVideo({
+            ...device,
+            resolvedCameraStreamUrl: directStreamUrl,
+            useProxyCamera: false,
+          });
+          setShowVideoPlayer(true);
+          showStyledAlert('Using Direct Camera', 'Camera is not registered in proxy API yet. Opened direct camera stream from device info.', 'warning');
+          return;
+        }
+
+        showStyledAlert(
+          'Camera Not Ready',
+          'Camera stream is not registered yet. Start mjpeg-camera-server.js on the device and try again.',
+          'error'
+        );
+        return;
+      }
+
+      if (response.status === 403) {
+        showStyledAlert(
+          'Access Denied',
+          errorData.reason || 'User or device is blocked by admin.',
+          'error'
+        );
+        return;
+      }
+
+      if (response.status === 401) {
+        showStyledAlert('Camera Unavailable', 'Authentication required. Please sign in again.', 'error');
+        return;
+      }
+
+      showStyledAlert(
+        'Camera Unavailable',
+        errorData.reason || errorData.error || `Failed to open camera (${response.status})`,
+        'error'
+      );
+    } catch (error) {
+      console.error('[Dashboard] Error opening camera:', error);
+
+      const directStreamUrl = getDirectDeviceStreamUrl(device);
+      if (directStreamUrl) {
+        setSelectedDeviceForVideo({
+          ...device,
+          resolvedCameraStreamUrl: directStreamUrl,
+          useProxyCamera: false,
+        });
+        setShowVideoPlayer(true);
+        showStyledAlert('Using Direct Camera', 'Could not reach camera API, so the app opened direct stream from the device.', 'warning');
+        return;
+      }
+
+      showStyledAlert('Camera Unavailable', 'Failed to contact camera API.', 'error');
+    }
+  };
+
   // Fetch sensors for a device
   const fetchDeviceSensors = async (deviceId: string) => {
     try {
       setLoadingSensors(true);
-      const API_URL = process.env.EXPO_PUBLIC_API_URL;
       const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
       const userId = auth.currentUser?.uid;
 
       const response = await fetch(
-        `${API_URL}/api/sensors?deviceId=${deviceId}`,
+        `${sensorControlApiUrl}/api/sensors?deviceId=${deviceId}`,
         {
           headers: {
             'Content-Type': 'application/json',
@@ -561,14 +781,13 @@ export default function Dashboard() {
   // Toggle sensor state
   const toggleSensorState = async (sensor: any) => {
     try {
-      const API_URL = process.env.EXPO_PUBLIC_API_URL;
       const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
       const userId = auth.currentUser?.uid;
 
       const newState = !sensor.enabled;
       
       const response = await fetch(
-        `${API_URL}/api/sensors/${sensor.sensor_id}/state`,
+        `${sensorControlApiUrl}/api/sensors/${sensor.sensor_id}/state`,
         {
           method: 'PUT',
           headers: {
@@ -706,7 +925,7 @@ export default function Dashboard() {
           onPress={() => setShowProfileModal(true)}
           style={styles.profileButton}
         />
-        <Text style={styles.appTitle}>Sensor App</Text>
+        <Text style={styles.appTitle}>RuTAG-HACS</Text>
         <View style={styles.headerSpacer} />
       </View>
 
@@ -781,6 +1000,9 @@ export default function Dashboard() {
                 
                 // Support both old and new field names for backward compatibility
                 const ratingAccuracy = item.ratingAccuracy !== undefined ? item.ratingAccuracy : (item as any).accuracyFeedback;
+                const ratingScore = typeof item.rating === "number"
+                  ? item.rating
+                  : (typeof (item as any).userRating === "number" ? (item as any).userRating : null);
                 
                 // Debug log
                 if (ratingAccuracy !== null && ratingAccuracy !== undefined) {
@@ -832,6 +1054,11 @@ export default function Dashboard() {
                           {ratingAccuracy === true ? "✓ Accurate" : ratingAccuracy === false ? "✗ Inaccurate" : "⭘ Not rated"}
                         </Text>
                       </View>
+                      {ratingScore !== null && (
+                        <View style={styles.ratingScoreBadge}>
+                          <Text style={styles.ratingScoreText}>⭐ {ratingScore}/10</Text>
+                        </View>
+                      )}
                       {item.acknowledged && (
                         <Text style={styles.mlAlertAcknowledged}>✅</Text>
                       )}
@@ -898,16 +1125,20 @@ export default function Dashboard() {
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={[styles.actionBtn, styles.editBtn]}
-                          onPress={() => {
-                            setSelectedDeviceForVideo(item);
-                            setShowVideoPlayer(true);
-                          }}
+                          onPress={() => openDeviceCamera(item)}
                         >
                           <MaterialIcons name="videocam" size={20} />
                           <Text style={styles.actionBtnLabel}>Camera</Text>
                         </TouchableOpacity>
                       </View>
                       <View style={styles.actionRow}>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.renameBtn]}
+                          onPress={() => handleUpdateLabel(item.id, item.label || item.name || "")}
+                        >
+                          <MaterialIcons name="edit" size={20} />
+                          <Text style={styles.actionBtnLabel}>Rename</Text>
+                        </TouchableOpacity>
                         <TouchableOpacity
                           style={[styles.actionBtn, styles.deleteBtn]}
                           onPress={() => handleUnclaimDevice(item.id, item.label || item.name || "Unnamed Device")}
@@ -972,14 +1203,20 @@ export default function Dashboard() {
             )}
 
             <View style={styles.modalButtons}>
-              <Button
-                title="Close"
+              <TouchableOpacity
+                style={[
+                  styles.closeButton,
+                  claimingDeviceId !== null && styles.buttonDisabled,
+                ]}
                 onPress={() => {
                   setShowAddModal(false);
                   setAvailableDevices([]);
                 }}
                 disabled={claimingDeviceId !== null}
-              />
+                activeOpacity={0.85}
+              >
+                <Text style={styles.buttonText}>Close</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -989,7 +1226,7 @@ export default function Dashboard() {
       <Modal
         visible={showRatingModal}
         transparent
-        animationType="fade"
+        animationType="slide"
         onRequestClose={() => {
           setShowRatingModal(false);
           setSelectedAlert(null);
@@ -998,79 +1235,93 @@ export default function Dashboard() {
         }}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.ratingModalContent}>
-            {selectedAccuracy === null ? (
-              <>
-                <Text style={styles.ratingModalTitle}>Was this alert accurate?</Text>
-                <Text style={styles.ratingModalSubtitle}>
-                  {selectedAlert?.deviceLabel}: {selectedAlert?.message}
-                </Text>
-
-                <View style={styles.accuracyButtonsContainer}>
-                  <TouchableOpacity
-                    style={[
-                      styles.accuracyButton,
-                      styles.accuracyButtonYes,
-                      selectedAccuracy === true && styles.accuracyButtonSelected,
-                    ]}
-                    onPress={() => setSelectedAccuracy(true)}
-                  >
-                    <Text style={styles.accuracyButtonText}>✅ Yes</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.accuracyButton,
-                      styles.accuracyButtonNo,
-                      selectedAccuracy === false && styles.accuracyButtonSelected,
-                    ]}
-                    onPress={() => setSelectedAccuracy(false)}
-                  >
-                    <Text style={styles.accuracyButtonText}>❌ No</Text>
-                  </TouchableOpacity>
-                </View>
-              </>
-            ) : (
-              <>
-                <Text style={styles.ratingModalTitle}>Rate this Alert</Text>
-                <Text style={styles.ratingModalSubtitle}>
-                  Accuracy: {selectedAccuracy ? "✅ Accurate" : "❌ Inaccurate"}
-                </Text>
-
-                <View style={styles.ratingScale}>
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((rating) => (
-                    <TouchableOpacity
-                      key={rating}
-                      style={[
-                        styles.ratingButton,
-                        selectedRating === rating && styles.ratingButtonSelected,
-                      ]}
-                      onPress={() => setSelectedRating(rating)}
-                    >
-                      <Text
-                        style={[
-                          styles.ratingButtonText,
-                          selectedRating === rating && styles.ratingButtonTextSelected,
-                        ]}
-                      >
-                        {rating}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {selectedRating !== null && (
-                  <Text style={styles.ratingFeedback}>
-                    {selectedRating <= 3
-                      ? "😞 Poor"
-                      : selectedRating <= 6
-                      ? "😐 Average"
-                      : selectedRating <= 8
-                      ? "😊 Good"
-                      : "😍 Excellent"}
+          <View
+            style={[
+              styles.ratingModalContent,
+              {
+                paddingTop: insets.top + 24,
+                paddingBottom: Math.max(insets.bottom + 24, 32),
+              },
+            ]}
+          >
+            <View style={styles.ratingModalBody}>
+              {selectedAccuracy === null ? (
+                <>
+                  <Text style={styles.ratingModalTitle}>Was this alert accurate?</Text>
+                  <Text style={styles.ratingModalSubtitle}>
+                    {selectedAlert?.deviceLabel}: {selectedAlert?.message}
                   </Text>
-                )}
-              </>
-            )}
+
+                  <View style={styles.accuracyButtonsContainer}>
+                    <TouchableOpacity
+                      style={[
+                        styles.accuracyButton,
+                        styles.accuracyButtonYes,
+                        selectedAccuracy === true && styles.accuracyButtonSelected,
+                      ]}
+                      onPress={() => setSelectedAccuracy(true)}
+                    >
+                      <Text style={styles.accuracyButtonText}>✅ Yes</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.accuracyButton,
+                        styles.accuracyButtonNo,
+                        selectedAccuracy === false && styles.accuracyButtonSelected,
+                      ]}
+                      onPress={() => setSelectedAccuracy(false)}
+                    >
+                      <Text style={styles.accuracyButtonText}>❌ No</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.ratingModalTitle}>Rate this Alert</Text>
+                  <Text style={styles.ratingModalSubtitle}>
+                    Accuracy: {selectedAccuracy ? "✅ Accurate" : "❌ Inaccurate"}
+                  </Text>
+
+                  <View style={styles.ratingScale}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((rating) => (
+                      <TouchableOpacity
+                        key={rating}
+                        style={[
+                          styles.ratingButton,
+                          selectedRating === rating && styles.ratingButtonSelected,
+                        ]}
+                        onPress={() => setSelectedRating(rating)}
+                      >
+                        <View style={styles.ratingButtonLabelWrap}>
+                          <Text
+                            style={[
+                              styles.ratingButtonText,
+                              selectedRating === rating && styles.ratingButtonTextSelected,
+                            ]}
+                            includeFontPadding={false}
+                            allowFontScaling={false}
+                          >
+                            {rating}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {selectedRating !== null && (
+                    <Text style={styles.ratingFeedback}>
+                      {selectedRating <= 3
+                        ? "😞 Poor"
+                        : selectedRating <= 6
+                        ? "😐 Average"
+                        : selectedRating <= 8
+                        ? "😊 Good"
+                        : "😍 Excellent"}
+                    </Text>
+                  )}
+                </>
+              )}
+            </View>
 
             <View style={styles.ratingModalButtons}>
               <TouchableOpacity
@@ -1129,8 +1380,20 @@ export default function Dashboard() {
       >
         {selectedMLAlert && (
           <View style={styles.modalOverlay}>
-            <View style={styles.mlAlertDetailModal}>
-              <ScrollView showsVerticalScrollIndicator={true}>
+            <View
+              style={[
+                styles.mlAlertDetailModal,
+                {
+                  paddingTop: insets.top + 16,
+                  paddingBottom: Math.max(insets.bottom + 20, 32),
+                },
+              ]}
+            >
+              <ScrollView
+                style={styles.mlAlertDetailScroll}
+                contentContainerStyle={styles.mlAlertDetailScrollContent}
+                showsVerticalScrollIndicator={true}
+              >
                 {/* Header */}
                 <View style={styles.mlAlertDetailHeader}>
                   <TouchableOpacity
@@ -1214,9 +1477,17 @@ export default function Dashboard() {
                   <View style={styles.mlAlertDetailSection}>
                     <Text style={styles.mlAlertDetailLabel}>Screenshots ({selectedMLAlert.screenshots.length})</Text>
                     {selectedMLAlert.screenshots.map((img, idx) => (
-                      <Text key={idx} style={styles.mlAlertDetailValue}>
-                        📸 {img}
-                      </Text>
+                      <View key={idx} style={styles.screenshotItemRow}>
+                        <Text numberOfLines={1} style={styles.screenshotPathText}>
+                          📸 {img}
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.viewImageButton}
+                          onPress={() => openAlertImage(img)}
+                        >
+                          <Text style={styles.viewImageButtonText}>View Image</Text>
+                        </TouchableOpacity>
+                      </View>
                     ))}
                   </View>
                 )}
@@ -1272,14 +1543,18 @@ export default function Dashboard() {
                                 ]}
                                 onPress={() => setMLAlertRating(rating)}
                               >
-                                <Text
-                                  style={[
-                                    styles.ratingButtonText,
-                                    mlAlertRating === rating && styles.ratingButtonTextSelected,
-                                  ]}
-                                >
-                                  {rating}
-                                </Text>
+                                <View style={styles.ratingButtonLabelWrap}>
+                                  <Text
+                                    style={[
+                                      styles.ratingButtonText,
+                                      mlAlertRating === rating && styles.ratingButtonTextSelected,
+                                    ]}
+                                    includeFontPadding={false}
+                                    allowFontScaling={false}
+                                  >
+                                    {rating}
+                                  </Text>
+                                </View>
                               </TouchableOpacity>
                             ))}
                           </View>
@@ -1302,7 +1577,7 @@ export default function Dashboard() {
               {/* Action Buttons */}
               <View style={styles.mlAlertDetailButtons}>
                 <TouchableOpacity
-                  style={[styles.button, styles.cancelButton]}
+                  style={[styles.button, styles.closeButton]}
                   onPress={() => {
                     setShowMLAlertDetailModal(false);
                     setSelectedMLAlert(null);
@@ -1351,16 +1626,7 @@ export default function Dashboard() {
                 {selectedMLAlert.rating && (
                   <TouchableOpacity
                     style={[styles.button, styles.deleteButton]}
-                    onPress={async () => {
-                      try {
-                        await deleteAlert(selectedMLAlert.deviceId, selectedMLAlert.id!);
-                        Alert.alert("✅ Deleted", "Alert has been removed");
-                        setShowMLAlertDetailModal(false);
-                        setSelectedMLAlert(null);
-                      } catch (error) {
-                        Alert.alert("Error", "Failed to delete alert");
-                      }
-                    }}
+                    onPress={() => handleDeleteMLAlert(selectedMLAlert)}
                   >
                     <Text style={styles.buttonText}>Delete</Text>
                   </TouchableOpacity>
@@ -1369,6 +1635,92 @@ export default function Dashboard() {
             </View>
           </View>
         )}
+      </Modal>
+
+      {/* Alert Image Modal */}
+      <Modal
+        visible={showAlertImageModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setShowAlertImageModal(false);
+          setSelectedAlertImageUri('');
+          setSelectedAlertImageSource('');
+          setAlertImageLoading(false);
+          setAlertImageError(null);
+        }}
+      >
+        <View style={styles.alertImageOverlay}>
+          <View style={styles.alertImageContainer}>
+            <View style={styles.alertImageHeader}>
+              <Text style={styles.alertImageTitle}>Alert Image</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowAlertImageModal(false);
+                  setSelectedAlertImageUri('');
+                  setSelectedAlertImageSource('');
+                  setAlertImageLoading(false);
+                  setAlertImageError(null);
+                }}
+              >
+                <Text style={styles.alertImageCloseBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.alertImageBody}>
+              {alertImageLoading ? (
+                <View style={styles.alertImageStateBox}>
+                  <ActivityIndicator size="large" color="#fff" />
+                  <Text style={styles.alertImageStateText}>Loading image...</Text>
+                </View>
+              ) : alertImageError ? (
+                <View style={styles.alertImageStateBox}>
+                  <Text style={styles.alertImageErrorText}>Failed to load image</Text>
+                  <Text style={styles.alertImageSourceText}>{selectedAlertImageSource}</Text>
+                  <Text style={styles.alertImageHintText}>{alertImageError}</Text>
+                </View>
+              ) : selectedAlertImageUri ? (
+                <Image
+                  source={{ uri: selectedAlertImageUri }}
+                  style={styles.alertImagePreview}
+                  resizeMode="contain"
+                />
+              ) : (
+                <View style={styles.alertImageStateBox}>
+                  <Text style={styles.alertImageHintText}>No image selected</Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.alertImageFooter}>
+              <TouchableOpacity
+                style={styles.alertImageFooterButton}
+                onPress={() => {
+                  setShowAlertImageModal(false);
+                  setSelectedAlertImageUri('');
+                  setSelectedAlertImageSource('');
+                  setAlertImageLoading(false);
+                  setAlertImageError(null);
+                }}
+              >
+                <Text style={styles.alertImageFooterButtonText}>Close</Text>
+              </TouchableOpacity>
+
+              {selectedAlertImageUri.startsWith('http://') || selectedAlertImageUri.startsWith('https://') ? (
+                <TouchableOpacity
+                  style={[styles.alertImageFooterButton, styles.alertImageOpenExternalButton]}
+                  onPress={() => {
+                    Linking.openURL(selectedAlertImageUri).catch(() => {
+                      showStyledAlert('Error', 'Could not open image URL', 'error');
+                    });
+                  }}
+                >
+                  <Text style={styles.alertImageFooterButtonText}>Open External</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        </View>
       </Modal>
 
       {/* Profile Modal */}
@@ -1415,7 +1767,7 @@ export default function Dashboard() {
               style={styles.logoutButton}
               onPress={() => {
                 setShowProfileModal(false);
-                handleLogout();
+                handleLogoutConfirmation();
               }}
               disabled={loggingOut}
             >
@@ -1577,8 +1929,10 @@ export default function Dashboard() {
 
             <View style={styles.videoPlayerContent}>
               <MJPEGVideoPlayer
-                streamUrl={`http://${selectedDeviceForVideo?.ipAddress || selectedDeviceForVideo?.ip_address}:8080/stream.mjpeg`}
+                streamUrl={getCameraProxyStreamUrl(selectedDeviceForVideo)}
                 deviceLabel={selectedDeviceForVideo?.label || selectedDeviceForVideo?.name || 'Camera'}
+                apiKey={(selectedDeviceForVideo as any)?.useProxyCamera ? appApiKey : ''}
+                userId={(selectedDeviceForVideo as any)?.useProxyCamera ? (auth.currentUser?.uid || '') : ''}
                 onClose={() => {
                   setShowVideoPlayer(false);
                   setSelectedDeviceForVideo(null);
@@ -1609,7 +1963,13 @@ export default function Dashboard() {
         onRequestClose={() => setShowSensorControlModal(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <View
+            style={[
+              styles.modalContent,
+              styles.sensorControlModalContent,
+              { paddingBottom: Math.max(insets.bottom + 20, 32) },
+            ]}
+          >
             <Text style={styles.modalTitle}>🎛️ Sensor Control</Text>
             <Text style={styles.modalSubtitle}>
               {selectedDeviceForSensorControl?.label || selectedDeviceForSensorControl?.name}
@@ -1694,10 +2054,15 @@ export default function Dashboard() {
             )}
 
             <TouchableOpacity
-              style={[styles.modalButton, styles.cancelButton]}
+              style={[
+                styles.sensorControlCloseButton,
+                { marginBottom: Math.max(insets.bottom, 12) },
+              ]}
               onPress={() => setShowSensorControlModal(false)}
+              activeOpacity={0.85}
             >
-              <Text style={styles.modalButtonText}>Close</Text>
+              <MaterialIcons name="close" size={18} color="#FFFFFF" />
+              <Text style={styles.sensorControlCloseButtonText}>Close Panel</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1709,7 +2074,9 @@ export default function Dashboard() {
         title={styledAlertConfig.title}
         message={styledAlertConfig.message}
         type={styledAlertConfig.type}
+        buttonLayout={styledAlertConfig.buttonLayout}
         buttons={styledAlertConfig.buttons}
+        inputConfig={styledAlertConfig.inputConfig}
         onClose={() => setStyledAlertVisible(false)}
       />
     </ScrollView>
@@ -1847,6 +2214,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFEBEE",
     borderColor: "#F44336",
   },
+  renameBtn: {
+    backgroundColor: "#FFF3E0",
+    borderColor: "#FB8C00",
+  },
   actionBtnText: {
     fontSize: 24,
     marginBottom: 4,
@@ -1876,7 +2247,7 @@ const styles = StyleSheet.create({
   },
   addButton: {
     backgroundColor: "#10B981",
-    paddingVertical: 10,
+    paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 8,
     justifyContent: "center",
@@ -2028,12 +2399,18 @@ const styles = StyleSheet.create({
     color: "#7C3AED",
   },
   profileCloseBtn: {
-    padding: 8,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#DC2626",
+    alignItems: "center",
+    justifyContent: "center",
   },
   profileCloseBtnText: {
-    fontSize: 24,
-    color: "#6B7280",
+    fontSize: 20,
+    color: "#FFFFFF",
     fontWeight: "bold",
+    lineHeight: 22,
   },
   profileInfo: {
     marginBottom: 16,
@@ -2060,6 +2437,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     justifyContent: "center",
     alignItems: "center",
+    marginTop: 12,
   },
   logoutButtonText: {
     fontSize: 16,
@@ -2068,9 +2446,9 @@ const styles = StyleSheet.create({
   },
   settingsButton: {
     backgroundColor: "#6D28D9",
-    paddingVertical: 14,
+    paddingVertical: 12,
     paddingHorizontal: 24,
-    borderRadius: 12,
+    borderRadius: 8,
     marginBottom: 12,
     alignItems: "center",
   },
@@ -2137,12 +2515,14 @@ const styles = StyleSheet.create({
   },
   ratingModalContent: {
     backgroundColor: "#fff",
-    borderRadius: 16,
+    width: "100%",
+    height: "100%",
     padding: 24,
-    paddingBottom: 60,
-    width: "85%",
-    maxWidth: 400,
     elevation: 10,
+  },
+  ratingModalBody: {
+    flex: 1,
+    justifyContent: "center",
   },
   ratingModalTitle: {
     fontSize: 20,
@@ -2168,12 +2548,18 @@ const styles = StyleSheet.create({
   ratingButton: {
     width: "22%",
     aspectRatio: 1,
-    borderRadius: 12,
+    borderRadius: 8,
     backgroundColor: "#f0f0f0",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
     borderColor: "#ddd",
+    overflow: "hidden",
+  },
+  ratingButtonLabelWrap: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
   },
   ratingButtonSelected: {
     backgroundColor: "#FF9800",
@@ -2183,6 +2569,8 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "bold",
     color: "#666",
+    textAlign: "center",
+    lineHeight: 16,
   },
   ratingButtonTextSelected: {
     color: "#fff",
@@ -2209,6 +2597,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 8,
     alignItems: "center",
+    justifyContent: "center",
     borderWidth: 2,
     borderColor: "transparent",
   },
@@ -2246,6 +2635,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     justifyContent: "center",
     alignItems: "center",
+    marginVertical: 4,
   },
   buttonText: {
     color: "#fff",
@@ -2307,7 +2697,7 @@ const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
+    justifyContent: "flex-end",
     alignItems: "center",
   },
   modalContent: {
@@ -2316,7 +2706,11 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 20,
     padding: 20,
     paddingBottom: 30,
-    maxHeight: "80%",
+    height: "100%",
+    width: "100%",
+  },
+  sensorControlModalContent: {
+    justifyContent: "flex-start",
   },
   modalTitle: {
     fontSize: 20,
@@ -2412,9 +2806,15 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   videoPlayerCloseBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#DC2626",
+    color: "#FFFFFF",
     fontSize: 20,
-    color: "#fff",
     fontWeight: "bold",
+    textAlign: "center",
+    lineHeight: 34,
   },
   videoPlayerContent: {
     flex: 1,
@@ -2485,24 +2885,25 @@ const styles = StyleSheet.create({
     borderTopColor: "#333",
   },
   closeButton: {
-    backgroundColor: "#FF9800",
-    paddingVertical: 8,
-    borderRadius: 6,
+    backgroundColor: "#DC2626",
+    paddingVertical: 10,
+    borderRadius: 12,
     alignItems: "center",
     marginBottom: 4,
   },
   primaryButton: {
     backgroundColor: "#00FF41",
+    borderRadius: 8,
   },
   modeButton: {
     backgroundColor: "#2196F3",
-    paddingVertical: 10,
+    paddingVertica8: 10,
     borderRadius: 6,
     alignItems: "center",
     marginBottom: 8,
   },
   buttonText: {
-    color: "#000",
+    color: "#FFFFFF",
     fontWeight: "bold",
     fontSize: 14,
   },
@@ -2590,6 +2991,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     color: "#FFFFFF",
+    textAlign: "center",
+  },
+  ratingScoreBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: "#FFF3E0",
+    borderWidth: 1,
+    borderColor: "#FFB74D",
+  },
+  ratingScoreText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#E65100",
+    textAlign: "center",
   },
   mlAlertConfidence: {
     fontSize: 12,
@@ -2606,13 +3022,17 @@ const styles = StyleSheet.create({
   },
   mlAlertDetailModal: {
     backgroundColor: "#fff",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: "85%",
-    marginTop: "auto",
+    width: "100%",
+    height: "100%",
     paddingHorizontal: 20,
     paddingTop: 20,
-    paddingBottom: 100,
+    paddingBottom: 32,
+  },
+  mlAlertDetailScroll: {
+    flex: 1,
+  },
+  mlAlertDetailScrollContent: {
+    paddingBottom: 16,
   },
   mlAlertDetailHeader: {
     flexDirection: "row",
@@ -2631,10 +3051,15 @@ const styles = StyleSheet.create({
     marginLeft: 12,
   },
   mlAlertCloseBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#DC2626",
     fontSize: 24,
     fontWeight: "bold",
-    color: "#999",
-    padding: 8,
+    color: "#FFFFFF",
+    textAlign: "center",
+    lineHeight: 34,
   },
   mlAlertDetailSection: {
     marginBottom: 18,
@@ -2663,6 +3088,132 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     marginTop: 20,
+  },
+  screenshotItemRow: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+  },
+  screenshotPathText: {
+    fontSize: 12,
+    color: '#475569',
+    marginBottom: 8,
+  },
+  viewImageButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2563EB',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  viewImageButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  alertImageOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+  },
+  alertImageContainer: {
+    width: '100%',
+    maxWidth: 520,
+    height: '84%',
+    backgroundColor: '#111827',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  alertImageHeader: {
+    height: 52,
+    backgroundColor: '#1F2937',
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  alertImageTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  alertImageCloseBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#DC2626',
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '700',
+    textAlign: 'center',
+    lineHeight: 34,
+  },
+  alertImageBody: {
+    flex: 1,
+    backgroundColor: '#000000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  alertImageStateBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  alertImageStateText: {
+    color: '#FFFFFF',
+    marginTop: 10,
+    fontSize: 14,
+  },
+  alertImageErrorText: {
+    color: '#FCA5A5',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  alertImageHintText: {
+    color: '#CBD5E1',
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  alertImageSourceText: {
+    color: '#93C5FD',
+    fontSize: 12,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  alertImagePreview: {
+    width: '100%',
+    height: '100%',
+  },
+  alertImageFooter: {
+    minHeight: 58,
+    backgroundColor: '#111827',
+    borderTopWidth: 1,
+    borderTopColor: '#374151',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  alertImageFooterButton: {
+    backgroundColor: '#DC2626',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  alertImageOpenExternalButton: {
+    backgroundColor: '#2563EB',
+  },
+  alertImageFooterButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
   deleteButton: {
     backgroundColor: "#FF5252",
@@ -2836,9 +3387,11 @@ const styles = StyleSheet.create({
   },
   enableButton: {
     backgroundColor: '#4CAF50',
+    borderRadius: 8,
   },
   disableButton: {
     backgroundColor: '#F44336',
+    borderRadius: 8,
   },
   toggleButtonText: {
     color: '#fff',
@@ -2878,6 +3431,30 @@ const styles = StyleSheet.create({
   },
   sensorListItemBadgeText: {
     fontSize: 20,
+  },
+  sensorControlCloseButton: {
+    marginTop: 14,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#DC2626",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    minWidth: 160,
+    shadowColor: "#DC2626",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  sensorControlCloseButtonText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
 });
 
